@@ -264,8 +264,42 @@
   #gameOverSub {
     font-size: 14px; color: rgba(244,241,255,0.75);
   }
-  /* 【(54)Step7】ポーカー操作パネル：カード自体は3D空間（プッシャー奥の壁）に表示、
-     操作（カードチェンジ・勝負する）はマウスで押すDOM UIとして画面下部中央に重ねる */
+  /* 【(54)Step7、2026-08-26 DOM UI化】3D空間内配置（壁際→画面手前左と2回試行）でも
+     手札が見えないとの実機指摘が続いたため、カード表示そのものをHTML/CSS UIへ
+     全面移行。画面左に固定表示し、視認性を確実にする。金属反射(metalnessMap)は
+     失われるが、カードデザイン自体が黒×ゴールドの装飾で作り込まれているため、
+     静的画像でも見栄えは保たれる想定。 */
+  #pokerHandArea {
+    position: fixed; left: 18px; top: 90px;
+    display: none; flex-direction: column; gap: 18px;
+    z-index: 16;
+  }
+  #pokerHandArea.show { display: flex; }
+  .poker-hand-label {
+    color: var(--gold); font-size: 12px; letter-spacing: 0.2em; font-weight: 700;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.8); margin-bottom: 6px;
+  }
+  .poker-hand-row { display: flex; gap: 7px; }
+  .poker-card {
+    width: 82px; height: 114.8px; border-radius: 6px; overflow: hidden;
+    background: #0a0a0a; box-shadow: 0 6px 16px rgba(0,0,0,0.7);
+    border: 2px solid rgba(255,213,74,0.28);
+    transform: scale(0.05); opacity: 0;
+    transition: transform 0.28s cubic-bezier(0.34,1.56,0.64,1), opacity 0.2s ease-out,
+      border-color 0.15s, box-shadow 0.15s, margin-top 0.15s;
+  }
+  .poker-card.dealt { transform: scale(1); opacity: 1; }
+  .poker-card.clickable { cursor: pointer; }
+  .poker-card.selected {
+    border-color: #ffcc33; box-shadow: 0 0 18px rgba(255,204,51,0.85), 0 6px 16px rgba(0,0,0,0.7);
+    margin-top: -10px;
+  }
+  .poker-card.clearing { transform: scale(0.05) rotate(12deg); opacity: 0; }
+  .poker-card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .poker-card.facedown img { visibility: hidden; }
+
+  /* 【(54)Step7】ポーカー操作パネル：操作（カードチェンジ・勝負する）はマウスで
+     押すDOM UIとして画面下部中央に表示 */
   #pokerPanel {
     position: fixed; left: 50%; bottom: 100px; transform: translateX(-50%);
     display: none; flex-direction: column; align-items: center; gap: 10px;
@@ -371,6 +405,29 @@
 </div>
 
 <div id="jpFlashOverlay"></div>
+
+<div id="pokerHandArea">
+  <div>
+    <div class="poker-hand-label">DEALER</div>
+    <div class="poker-hand-row" id="pokerDealerRow">
+      <div class="poker-card" id="pokerCardDealer0"><img alt="" /></div>
+      <div class="poker-card" id="pokerCardDealer1"><img alt="" /></div>
+      <div class="poker-card" id="pokerCardDealer2"><img alt="" /></div>
+      <div class="poker-card" id="pokerCardDealer3"><img alt="" /></div>
+      <div class="poker-card" id="pokerCardDealer4"><img alt="" /></div>
+    </div>
+  </div>
+  <div>
+    <div class="poker-hand-label">YOU</div>
+    <div class="poker-hand-row" id="pokerPlayerRow">
+      <div class="poker-card" id="pokerCardPlayer0"><img alt="" /></div>
+      <div class="poker-card" id="pokerCardPlayer1"><img alt="" /></div>
+      <div class="poker-card" id="pokerCardPlayer2"><img alt="" /></div>
+      <div class="poker-card" id="pokerCardPlayer3"><img alt="" /></div>
+      <div class="poker-card" id="pokerCardPlayer4"><img alt="" /></div>
+    </div>
+  </div>
+</div>
 
 <div id="pokerPanel">
   <div id="pokerHint">交換したいカードをクリックして選択（残り2回）</div>

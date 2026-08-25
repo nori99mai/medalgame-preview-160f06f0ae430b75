@@ -1602,9 +1602,10 @@ const gemMats = GEM_TYPES.map((g) => {
 const gems = []; // { mesh, body, typeIndex }
 const collectedGems = new Set();
 
-function spawnGem() {
+function spawnGem(forceTypeIndex) {
   // gemGeosはプロシージャル生成で同期的に全て揃っているため、単純にランダムに選ぶ
-  const typeIndex = Math.floor(Math.random() * GEM_TYPES.length);
+  // （forceTypeIndex指定時はポーカー勝利時など特定の種類を出したい場合に使う）
+  const typeIndex = forceTypeIndex !== undefined ? forceTypeIndex : Math.floor(Math.random() * GEM_TYPES.length);
   const mesh = new THREE.Mesh(gemGeos[typeIndex], gemMats[typeIndex]);
   mesh.castShadow = true;
   mesh.receiveShadow = true;
@@ -1781,145 +1782,42 @@ function decideDealerDiscards(cards) {
   });
 }
 
-// ---------- ポーカーのカード見た目（3Dメッシュ・テクスチャ） ----------
-// カードアセット：デザイン関係/ポーカー　参考/_生成カード/新しいフォルダー/ を
-// tools/optimize_cards.py で512px幅・JPEG化して軽量化したもの（assets/cards/）。
-// 通常画像は各カードの絵柄、_metal.pngは金線部分のみ白いmetalnessMap用マスク
-// （ハート/ダイヤ=金、スペード/クラブ=銀の反射をThree.js実装時に付ける）。
-const CARD_TEX_LOADER = new THREE.TextureLoader();
-const CARD_TEX_CACHE = new Map(); // key -> { map, metalMap }
+// ---------- ポーカーのカード見た目（DOM/CSS UI、2026-08-26全面移行） ----------
+// 【経緯】3D空間内配置（壁際→画面手前左と2回試行）を実機で確認したが、いずれも
+// 「手札が全く見えない」との指摘が続いた。視認性を確実にするため、カード表示は
+// HTML/CSSの固定オーバーレイへ全面移行（Three.jsのメッシュ・専用ライト・仮背景・
+// metalnessMapによる金属反射は撤去）。カードデザイン自体が黒×ゴールドで作り込まれて
+// いるため、静的な画像表示でも見栄えは保たれる。
+// アセット：assets/cards/{rank}_of_{suit}.jpg（tools/optimize_cards.pyで
+// デザイン関係/ポーカー　参考/カード最終版/ から生成、2026-08-26に差し替え済み）。
 function cardAssetName(card) {
   return card.rank === 'JOKER' ? 'Joker' : `${card.rank}_of_${card.suit}`;
 }
-function loadCardTexture(name) {
-  if (CARD_TEX_CACHE.has(name)) return CARD_TEX_CACHE.get(name);
-  const map = CARD_TEX_LOADER.load(`assets/cards/${name}.jpg`);
-  map.colorSpace = THREE.SRGBColorSpace;
-  const metalMap = CARD_TEX_LOADER.load(`assets/cards/${name}_metal.png`);
-  const entry = { map, metalMap };
-  CARD_TEX_CACHE.set(name, entry);
-  return entry;
-}
-// ポーカー発動前にゲーム起動時から静かにプリロードしておく（52枚+ジョーカー、3.5MB程度）
-for (const s of CARD_SUITS) for (const r of CARD_RANKS) loadCardTexture(`${r}_of_${s}`);
-loadCardTexture('Joker');
-
-const CARD_W = 1.15;
-const CARD_H = CARD_W * (1260 / 900); // 元画像の縦横比(900x1260)に合わせる
-const CARD_THICKNESS = 0.012;
-const cardBackMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0a, roughness: 0.5, metalness: 0.15 });
-const cardEdgeMat = new THREE.MeshStandardMaterial({ color: 0x1a1408, roughness: 0.6, metalness: 0.1 });
-
-// faceUp=false: 裏向き（テツさま指示＝専用背面デザインは作らずフラットな黒）
-// faceUp=true: 表向き（カード種別に応じたテクスチャ＋metalnessMap）
-function createCardMesh(card, faceUp) {
-  const geo = new THREE.BoxGeometry(CARD_W, CARD_H, CARD_THICKNESS);
-  let frontMat;
-  if (faceUp) {
-    const tex = loadCardTexture(cardAssetName(card));
-    frontMat = new THREE.MeshStandardMaterial({
-      map: tex.map, metalnessMap: tex.metalMap, metalness: 1.0, roughness: 0.35,
-    });
-  } else {
-    frontMat = cardBackMat;
-  }
-  // 選択中のハイライト表現用に縁のマテリアルはカードごとに複製する（共有だと全カードに影響するため）
-  const edgeMat = cardEdgeMat.clone();
-  // BoxGeometryの面順は [+x,-x,+y,-y,+z,-z]。+zを正面（表）として扱う。
-  const mats = [edgeMat, edgeMat, edgeMat, edgeMat, frontMat, cardBackMat];
-  const mesh = new THREE.Mesh(geo, mats);
-  mesh.castShadow = true;
-  mesh.userData.edgeMat = edgeMat;
-  return mesh;
-}
-function setCardSelectedVisual(mesh, selected) {
-  mesh.userData.edgeMat.emissive.setHex(selected ? 0xffcc33 : 0x000000);
-  mesh.userData.edgeMat.emissiveIntensity = selected ? 1.4 : 1.0;
-}
 
 // ---------- ポーカー進行管理（(54)Step7） ----------
-// アーチ穴（Step6）に10枚溜まったら発動。登場演出＝プッシャー奥の壁に急に1枚ずつ並ぶ。
-// プレイヤーは手札をマウスで選択→カードチェンジ（最大2回）→勝負する、の流れ。
-// ディーラーは人物を出さずカードのみで表現し、標準的なビデオポーカー戦略でチェンジする。
-const pokerCardGroup = new THREE.Group();
-scene.add(pokerCardGroup);
-
-// 【正直な記録・実機フィードバック2026-08-26で修正】初版はCARD_W=0.62・Y=1.35/2.05・
-// 壁の中央配置で実装したが、①スクリーンショットでコインの山と壁際に埋もれてほとんど
-// 視認できないことが判明（JPタワー(Step3)で得た「壁の内側・小さいサイズは既定カメラ
-// から見えにくい」教訓と同じ問題）→カードサイズを約2倍に拡大、②そもそも
-// counseling_log.mdのコアループでは「画面左側に登場演出」と決まっていたのに、実装時に
-// 壁の中央（左右対称）に配置してしまっていた（実装ミス）→X_OFFSETで画面左寄りに変更。
-const POKER_CARD_SPACING = 1.0;
-// 【2026-08-26再修正】「壁の奥」配置だと視点を動かしても手札がほぼ見えないとの
-// 実機指摘。「視点固定」ではなく、カード自体をプレイフィールド外側・画面左手前
-// （カメラに近く、JPタワーとはZ帯をずらして干渉しない位置）に配置し直した。
-// 【正直な記録】ディーラーカードのZ=2.0がJPタワー（Step3、X=-6.8・Z=2.0/0.0/-2.0の
-// 6本）のうち1本と完全に重なり、ショーダウンで表向きにしたはずのカードがタワーの
-// コインメッシュに埋もれて裏向きのまま止まって見える不具合が発生。JPタワーのZ範囲
-// （-2.0〜2.0）より手前へ完全にずらして分離した。
-const POKER_CARD_X_OFFSET = -6.5; // プレイフィールド外側左（JPタワーと同じX帯、Zで棲み分け）
-const POKER_PLAYER_Y = 1.7;
-const POKER_DEALER_Y = 2.6;
-const POKER_CARD_Z = 3.6;        // 手前（JPタワーのZ範囲より完全に手前）
-const POKER_DEALER_CARD_Z = 3.0; // プレイヤーより少し奥
-const POKER_DEAL_INTERVAL = 0.12;   // カードが1枚ずつ出現する間隔
-const POKER_DEAL_ANIM_DURATION = 0.25;
-const POKER_SELECT_LIFT = 0.18;     // 選択中カードの持ち上げ量
+// アーチ穴（Step6）に10枚溜まったら発動。プレイヤーは手札をマウスで選択→
+// カードチェンジ（最大2回）→勝負する、の流れ。ディーラーは人物を出さずカードのみで
+// 表現し、標準的なビデオポーカー戦略でチェンジする。
+const POKER_DEAL_INTERVAL = 0.12;        // カードが1枚ずつ出現する間隔
+const POKER_DEAL_ANIM_DURATION = 0.3;    // CSSのtransition時間と合わせる
 const POKER_DEALER_THINK_DURATION = 0.9;
 const POKER_SHOWDOWN_REVEAL_DURATION = 1.1;
 const POKER_RESULT_HOLD_DURATION = 3.0;
-const POKER_CLEAR_DURATION = 1.0;
+const POKER_CLEAR_DURATION = 0.5;        // CSSのtransition時間と合わせる
 
-function pokerCardX(i) { return POKER_CARD_X_OFFSET + (i - 2) * POKER_CARD_SPACING; }
-
-// 【実機フィードバック2026-08-26】既存ライト（sun/spot/accentLight）はプレイフィールド
-// 中央〜手前を照らす配置のため、壁際の高い位置にあるカードまで光が十分届かず、
-// metalnessMapによる金属反射が活きていなかった。カードの手前上方から専用に照らす
-// ライトを追加（カジノのスポットライト演出も兼ねる）。
-const pokerCardLight = new THREE.PointLight(0xfff2d0, 1.8, 9);
-pokerCardLight.position.set(POKER_CARD_X_OFFSET, 3.6, 3.3);
-scene.add(pokerCardLight);
-
-// 【実機フィードバック2026-08-26】カードの奥が真っ黒のままで寂しいとの指摘。正式な
-// デザインは今後別途相談するとして、まずは仮の背景（カジノのカーテン風グラデーション
-// ＋縦のひだ模様）を壁のさらに奥に配置しておく。
-function createPokerBackdropTexture() {
-  const canvas = document.createElement('canvas');
-  canvas.width = 512; canvas.height = 256;
-  const ctx = canvas.getContext('2d');
-  const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
-  grad.addColorStop(0, '#33101c');
-  grad.addColorStop(0.55, '#200a14');
-  grad.addColorStop(1, '#0a0508');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.globalAlpha = 0.12;
-  for (let x = 0; x < canvas.width; x += 22) {
-    ctx.fillStyle = (x / 22) % 2 === 0 ? '#000000' : '#ffd76a';
-    ctx.fillRect(x, 0, 11, canvas.height);
-  }
-  ctx.globalAlpha = 1;
-  return new THREE.CanvasTexture(canvas);
-}
-const pokerBackdropMat = new THREE.MeshStandardMaterial({
-  map: createPokerBackdropTexture(), roughness: 0.85, metalness: 0.05, side: THREE.DoubleSide,
-});
-const pokerBackdrop = new THREE.Mesh(new THREE.PlaneGeometry(6.5, 4.5), pokerBackdropMat);
-pokerBackdrop.position.set(POKER_CARD_X_OFFSET - 0.3, 2.1, 1.5);
-pokerBackdrop.rotation.y = Math.PI * 0.06; // カメラの方をわずかに向かせる
-scene.add(pokerBackdrop);
+const pokerHandAreaEl = document.getElementById('pokerHandArea');
+const pokerDealerSlots = [0, 1, 2, 3, 4].map(i => document.getElementById(`pokerCardDealer${i}`));
+const pokerPlayerSlots = [0, 1, 2, 3, 4].map(i => document.getElementById(`pokerCardPlayer${i}`));
 
 let pokerState = 'idle'; // idle|dealing|playerTurn|dealerTurn|showdown|result|clearing
 let pokerAfterDealState = 'playerTurn';
 let pokerDeck = [];
-let playerHand = []; // { card, mesh, selected }
-let dealerHand = []; // { card, mesh }
-let pokerDealQueue = []; // 登場/交換アニメーション待ちのメッシュ
+let playerHand = []; // { card, selected }
+let dealerHand = []; // { card }
+let pokerDealQueue = []; // 登場/交換アニメーション待ちのDOM要素
 let pokerDealTimer = 0;
 let pokerDiscardsLeft = 2;
 let pokerStateTimer = 0;
-let pokerClearParticles = [];
 
 const pokerPanelEl = document.getElementById('pokerPanel');
 const pokerHintEl = document.getElementById('pokerHint');
@@ -1936,35 +1834,43 @@ const HAND_PAYOUT = {
 };
 const POKER_LOSE_PAYOUT = 5;
 
+function setCardSlot(slotEl, card, faceUp) {
+  const img = slotEl.querySelector('img');
+  if (faceUp) {
+    img.src = `assets/cards/${cardAssetName(card)}.jpg`;
+    slotEl.classList.remove('facedown');
+  } else {
+    img.removeAttribute('src');
+    slotEl.classList.add('facedown');
+  }
+}
+
 function clearPokerCards() {
-  for (const h of [...playerHand, ...dealerHand]) pokerCardGroup.remove(h.mesh);
   playerHand = [];
   dealerHand = [];
+  for (const el of [...pokerDealerSlots, ...pokerPlayerSlots]) {
+    el.classList.remove('dealt', 'selected', 'clickable', 'clearing', 'facedown');
+    el.querySelector('img').removeAttribute('src');
+  }
 }
 
 function startPoker() {
   if (pokerState !== 'idle') return;
   clearPokerCards();
+  pokerHandAreaEl.classList.add('show');
   pokerDeck = shuffle(makeDeck().filter(c => c.rank !== 'JOKER')); // ドローポーカーはジョーカー抜き52枚
   pokerDealQueue = [];
   for (let i = 0; i < 5; i++) {
     const card = pokerDeck.pop();
-    const mesh = createCardMesh(card, true);
-    mesh.position.set(pokerCardX(i), POKER_PLAYER_Y, POKER_CARD_Z);
-    mesh.scale.setScalar(0.001);
-    pokerCardGroup.add(mesh);
-    playerHand.push({ card, mesh, selected: false });
-    pokerDealQueue.push(mesh);
+    playerHand.push({ card, selected: false });
+    setCardSlot(pokerPlayerSlots[i], card, true);
+    pokerDealQueue.push(pokerPlayerSlots[i]);
   }
   for (let i = 0; i < 5; i++) {
     const card = pokerDeck.pop();
-    // 視点移動で裏側が見えないよう、裏向きカードは表面も裏面と同じ黒マテリアルにする
-    const mesh = createCardMesh(card, false);
-    mesh.position.set(pokerCardX(i), POKER_DEALER_Y, POKER_DEALER_CARD_Z);
-    mesh.scale.setScalar(0.001);
-    pokerCardGroup.add(mesh);
-    dealerHand.push({ card, mesh });
-    pokerDealQueue.push(mesh);
+    dealerHand.push({ card });
+    setCardSlot(pokerDealerSlots[i], card, false); // 裏向き（専用背面デザインは作らずフラットな黒）
+    pokerDealQueue.push(pokerDealerSlots[i]);
   }
   pokerDiscardsLeft = 2;
   pokerAfterDealState = 'playerTurn';
@@ -1980,34 +1886,43 @@ function refreshPokerHint() {
   btnPokerDiscardEl.disabled = n === 0 || pokerDiscardsLeft <= 0;
 }
 
+pokerPlayerSlots.forEach((el, i) => {
+  el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (pokerState !== 'playerTurn') return;
+    const entry = playerHand[i];
+    entry.selected = !entry.selected;
+    el.classList.toggle('selected', entry.selected);
+    refreshPokerHint();
+  });
+});
+
 function onPlayerDiscardClick() {
   if (pokerState !== 'playerTurn' || pokerDiscardsLeft <= 0) return;
-  const toReplace = playerHand.filter(h => h.selected);
-  if (toReplace.length === 0) return;
+  const toReplaceIdx = playerHand.map((h, i) => (h.selected ? i : -1)).filter(i => i >= 0);
+  if (toReplaceIdx.length === 0) return;
   pokerDealQueue = [];
-  for (const entry of toReplace) {
-    pokerCardGroup.remove(entry.mesh);
+  for (const i of toReplaceIdx) {
     const newCard = pokerDeck.pop();
-    const newMesh = createCardMesh(newCard, true);
-    const i = playerHand.indexOf(entry);
-    newMesh.position.set(pokerCardX(i), POKER_PLAYER_Y, POKER_CARD_Z);
-    newMesh.scale.setScalar(0.001);
-    pokerCardGroup.add(newMesh);
-    entry.card = newCard;
-    entry.mesh = newMesh;
-    entry.selected = false;
-    pokerDealQueue.push(newMesh);
+    playerHand[i].card = newCard;
+    playerHand[i].selected = false;
+    const el = pokerPlayerSlots[i];
+    el.classList.remove('dealt', 'selected');
+    setCardSlot(el, newCard, true);
+    pokerDealQueue.push(el);
   }
   pokerDiscardsLeft--;
   pokerAfterDealState = 'playerTurn';
   pokerState = 'dealing';
   pokerDealTimer = 0;
   pokerPanelEl.classList.remove('show');
+  for (const el of pokerPlayerSlots) el.classList.remove('clickable');
 }
 
 function onPlayerStandClick() {
   if (pokerState !== 'playerTurn') return;
   pokerPanelEl.classList.remove('show');
+  for (const el of pokerPlayerSlots) el.classList.remove('clickable');
   pokerState = 'dealerTurn';
   pokerStateTimer = 0;
 }
@@ -2022,34 +1937,31 @@ function resolveDealerTurn() {
   const discardFlags = decideDealerDiscards(cards);
   dealerHand.forEach((entry, i) => {
     if (!discardFlags[i]) return;
-    const newCard = pokerDeck.pop();
-    entry.card = newCard; // 裏向きのままなのでメッシュの張り替えは不要
+    entry.card = pokerDeck.pop(); // 裏向きのままなので見た目の張り替えは不要
   });
   pokerState = 'showdown';
   pokerStateTimer = 0;
-  // ディーラーの手札を表向きに差し替える（めくる演出のトリガー）
+  // ディーラーの手札を表向きに差し替える（めくる演出：一瞬dealtを外して再付与しポップさせる）
   dealerHand.forEach((entry, i) => {
-    pokerCardGroup.remove(entry.mesh);
-    const newMesh = createCardMesh(entry.card, true);
-    newMesh.position.set(pokerCardX(i), POKER_DEALER_Y, POKER_DEALER_CARD_Z);
-    newMesh.scale.setScalar(1);
-    pokerCardGroup.add(newMesh);
-    entry.mesh = newMesh;
+    const el = pokerDealerSlots[i];
+    el.classList.remove('dealt');
+    setCardSlot(el, entry.card, true);
+    void el.offsetWidth; // reflowを強制してCSSトランジションを再トリガーする
+    el.classList.add('dealt');
   });
 }
 
+// 【2026-08-26修正】以前はcollectedGemsへ即座に加算するだけで、宝石の3Dオブジェクトを
+// 一切生成していなかった（「勝っても宝石が出てこない」バグ）。既存の宝石システムと
+// 同じく、実際にプッシャー上へ物理的にスポーンさせ、得点ラインを超えて実際にGETされた
+// 瞬間に初めてcollectedGems/jpTowerStageが更新される既存フローに統一した。
 function awardGemFromPoker() {
   const uncollected = [];
   for (let i = 0; i < GEM_TYPES.length; i++) if (!collectedGems.has(i)) uncollected.push(i);
-  if (uncollected.length === 0) return;
-  const typeIndex = uncollected[Math.floor(Math.random() * uncollected.length)];
-  collectedGems.add(typeIndex);
-  updateGemTrackerUI();
-  jpTowerStage = Math.min(jpTowerStage + 1, JP_TOWER_MAX_STAGE);
-  updateJpTowerVisual();
-  if (collectedGems.size >= GEM_TYPES.length && jackpotState === 'idle') {
-    startJackpot();
-  }
+  const typeIndex = uncollected.length > 0
+    ? uncollected[Math.floor(Math.random() * uncollected.length)]
+    : Math.floor(Math.random() * GEM_TYPES.length); // 全種類収集済みなら通常運用同様ランダム
+  spawnGem(typeIndex);
 }
 
 function resolveShowdown() {
@@ -2077,7 +1989,7 @@ function resolveShowdown() {
     ? `WIN！ ${HAND_NAME_JA[playerResult.name]}`
     : `残念… ${HAND_NAME_JA[playerResult.name]} vs ${HAND_NAME_JA[dealerResult.name]}`;
   pokerResultSubEl.textContent = win
-    ? `+${coinReward}枚${gemsAwarded > 0 ? `　＋誕生石${gemsAwarded}個` : ''}`
+    ? `+${coinReward}枚${gemsAwarded > 0 ? `　＋誕生石${gemsAwarded}個 登場！` : ''}`
     : `残念賞 +${coinReward}枚`;
   pokerResultOverlayEl.classList.add('show');
 
@@ -2085,74 +1997,40 @@ function resolveShowdown() {
   pokerStateTimer = 0;
 }
 
-// 退場演出：きらっと光って金色のミストとともに消える（勝敗にかかわらず同じ演出）
+// 退場演出：CSSのtransition（scale+rotateでフェードアウト）で消える（勝敗にかかわらず同じ演出）
 function startPokerClearing() {
   pokerState = 'clearing';
   pokerStateTimer = 0;
   pokerResultOverlayEl.classList.remove('show');
-  pokerClearParticles = [];
-  for (const h of [...playerHand, ...dealerHand]) {
-    for (let k = 0; k < 4; k++) {
-      const mat = new THREE.SpriteMaterial({
-        map: glintTexture, color: 0xffd76a, transparent: true, opacity: 0.9,
-        blending: THREE.AdditiveBlending, depthWrite: false,
-      });
-      const spr = new THREE.Sprite(mat);
-      spr.scale.setScalar(0.12 + Math.random() * 0.12);
-      spr.position.copy(h.mesh.position);
-      scene.add(spr);
-      pokerClearParticles.push({
-        sprite: spr,
-        vel: new THREE.Vector3((Math.random() - 0.5) * 0.6, 0.4 + Math.random() * 0.5, (Math.random() - 0.5) * 0.6),
-      });
-    }
-  }
+  for (const el of [...pokerDealerSlots, ...pokerPlayerSlots]) el.classList.add('clearing');
 }
 
-function updatePokerClearing(dt) {
-  const s = Math.min(1, pokerStateTimer / POKER_CLEAR_DURATION);
-  for (const h of [...playerHand, ...dealerHand]) h.mesh.scale.setScalar(Math.max(0.001, 1 - s));
-  for (const p of pokerClearParticles) {
-    p.sprite.position.addScaledVector(p.vel, dt);
-    p.sprite.material.opacity = Math.max(0, 0.9 * (1 - s));
-  }
-  if (s >= 1) {
-    for (const p of pokerClearParticles) scene.remove(p.sprite);
-    pokerClearParticles = [];
+function updatePokerClearing() {
+  if (pokerStateTimer >= POKER_CLEAR_DURATION) {
+    pokerHandAreaEl.classList.remove('show');
     clearPokerCards();
     pokerState = 'idle';
   }
 }
 
 function updatePokerDealing() {
-  let allDone = true;
-  for (let i = 0; i < pokerDealQueue.length; i++) {
-    const startAt = i * POKER_DEAL_INTERVAL;
-    const localT = pokerDealTimer - startAt;
-    if (localT < 0) { allDone = false; continue; }
-    const s = Math.min(1, localT / POKER_DEAL_ANIM_DURATION);
-    pokerDealQueue[i].scale.setScalar(0.001 + 0.999 * s);
-    if (s < 1) allDone = false;
-  }
-  if (allDone) {
+  const total = pokerDealQueue.length;
+  const doneCount = Math.min(total, Math.floor(pokerDealTimer / POKER_DEAL_INTERVAL) + 1);
+  for (let i = 0; i < doneCount; i++) pokerDealQueue[i].classList.add('dealt');
+  const animEnd = (total - 1) * POKER_DEAL_INTERVAL + POKER_DEAL_ANIM_DURATION;
+  if (doneCount >= total && pokerDealTimer >= animEnd) {
     pokerDealQueue = [];
     pokerState = pokerAfterDealState;
     pokerStateTimer = 0;
     if (pokerState === 'playerTurn') {
       pokerPanelEl.classList.add('show');
+      for (const el of pokerPlayerSlots) el.classList.add('clickable');
       refreshPokerHint();
     }
   }
 }
 
 function updatePoker(dt) {
-  // 選択中のプレイヤーカードは少し持ち上がる（dealing/clearing中はここでは動かさない）
-  if (pokerState === 'playerTurn' || pokerState === 'dealerTurn' || pokerState === 'showdown' || pokerState === 'result') {
-    for (const h of playerHand) {
-      const targetY = POKER_PLAYER_Y + (h.selected ? POKER_SELECT_LIFT : 0);
-      h.mesh.position.y += (targetY - h.mesh.position.y) * Math.min(1, dt * 8);
-    }
-  }
   switch (pokerState) {
     case 'dealing':
       pokerDealTimer += dt;
@@ -2172,7 +2050,7 @@ function updatePoker(dt) {
       break;
     case 'clearing':
       pokerStateTimer += dt;
-      updatePokerClearing(dt);
+      updatePokerClearing();
       break;
   }
 }
@@ -2709,23 +2587,9 @@ function insertAtClient(clientX, clientY) {
 }
 
 renderer.domElement.addEventListener('pointerdown', (e) => {
-  if (pokerState === 'playerTurn') {
-    // ポーカー中はカード選択のみ受け付け、通常のコイン投入は行わない
-    pointerNDC.x = (e.clientX / window.innerWidth) * 2 - 1;
-    pointerNDC.y = -(e.clientY / window.innerHeight) * 2 + 1;
-    raycaster.setFromCamera(pointerNDC, camera);
-    const hits = raycaster.intersectObjects(playerHand.map(h => h.mesh), false);
-    if (hits.length > 0) {
-      const entry = playerHand.find(h => h.mesh === hits[0].object);
-      if (entry) {
-        entry.selected = !entry.selected;
-        setCardSelectedVisual(entry.mesh, entry.selected);
-        refreshPokerHint();
-      }
-    }
-    return;
-  }
-  if (pokerState !== 'idle') return; // ポーカー進行中（dealing/dealerTurn等）はコイン投入も無効化
+  // 【2026-08-26】カード選択はpokerPlayerSlotsのDOM clickイベントに移行したため、
+  // ここではポーカー進行中（カード選択中も含む）はコイン投入を無効化するだけでよい。
+  if (pokerState !== 'idle') return;
   if (productionMode) return; // 本番モードはレーン投入のみ。画面クリックでの直接投入は無効化する
   insertAtClient(e.clientX, e.clientY);
 });
