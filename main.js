@@ -1682,6 +1682,454 @@ updateGemTrackerUI();
 
 let holeCount = 0;
 
+// ---------- ポーカー（(54)カジノゲーム化、Step7） ----------
+// アーチ穴（Step6）に10枚溜まったら発動。ドローポーカー（カードチェンジ最大2回、
+// レイズ無し）、プレイヤー対ディーラーの対戦形式。役判定は mdp/hoyle
+// （https://github.com/mdp/hoyle, MITライセンス）の考え方を参考にJSへ移植。
+const CARD_RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
+const CARD_SUITS = ['clubs', 'diamonds', 'hearts', 'spades'];
+const RANK_VALUES = { '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10, 'J': 11, 'Q': 12, 'K': 13, 'A': 14 };
+const HAND_NAME_JA = {
+  highCard: 'ハイカード', onePair: 'ワンペア', twoPair: 'ツーペア', threeOfAKind: 'スリーカード',
+  straight: 'ストレート', flush: 'フラッシュ', fullHouse: 'フルハウス', fourOfAKind: 'フォーカード',
+  straightFlush: 'ストレートフラッシュ', royalFlush: 'ロイヤルストレートフラッシュ',
+};
+
+function makeDeck() {
+  const deck = [];
+  for (const s of CARD_SUITS) for (const r of CARD_RANKS) deck.push({ rank: r, suit: s });
+  deck.push({ rank: 'JOKER', suit: null });
+  return deck;
+}
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+// ジョーカーはドローポーカーの手札としては配らない設計（配当ルールにジョーカーの
+// 扱いが含まれていないため）。デッキには含めるが、配布時にリドローで除外する。
+function evaluateHand(cards) {
+  const ranks = cards.map(c => RANK_VALUES[c.rank]).sort((a, b) => a - b);
+  const suits = cards.map(c => c.suit);
+  const isFlush = suits.every(s => s === suits[0]);
+
+  const rankCounts = {};
+  for (const r of ranks) rankCounts[r] = (rankCounts[r] || 0) + 1;
+  const countEntries = Object.entries(rankCounts).map(([r, c]) => [Number(r), c]);
+  countEntries.sort((a, b) => b[1] - a[1] || b[0] - a[0]);
+  const counts = countEntries.map(e => e[1]);
+  const kickers = countEntries.map(e => e[0]);
+
+  const uniqueRanks = [...new Set(ranks)];
+  let isStraight = false;
+  let straightHigh = ranks[4];
+  if (uniqueRanks.length === 5) {
+    if (ranks[4] - ranks[0] === 4) {
+      isStraight = true;
+    } else if (ranks[0] === 2 && ranks[1] === 3 && ranks[2] === 4 && ranks[3] === 5 && ranks[4] === 14) {
+      isStraight = true; // A-2-3-4-5のホイール（Aを1として扱う）
+      straightHigh = 5;
+    }
+  }
+
+  const isRoyalSpadeFlush = isStraight && isFlush && straightHigh === 14 && cards.every(c => c.suit === 'spades');
+
+  if (isRoyalSpadeFlush) return { rank: 9, name: 'royalFlush', kickers: [straightHigh] };
+  if (isStraight && isFlush) return { rank: 8, name: 'straightFlush', kickers: [straightHigh] };
+  if (counts[0] === 4) return { rank: 7, name: 'fourOfAKind', kickers };
+  if (counts[0] === 3 && counts[1] === 2) return { rank: 6, name: 'fullHouse', kickers };
+  if (isFlush) return { rank: 5, name: 'flush', kickers: [...ranks].sort((a, b) => b - a) };
+  if (isStraight) return { rank: 4, name: 'straight', kickers: [straightHigh] };
+  if (counts[0] === 3) return { rank: 3, name: 'threeOfAKind', kickers };
+  if (counts[0] === 2 && counts[1] === 2) return { rank: 2, name: 'twoPair', kickers };
+  if (counts[0] === 2) return { rank: 1, name: 'onePair', kickers };
+  return { rank: 0, name: 'highCard', kickers: [...ranks].sort((a, b) => b - a) };
+}
+// 正: handAの勝ち／負: handBの勝ち／0: 引き分け
+function compareHands(handA, handB) {
+  if (handA.rank !== handB.rank) return handA.rank - handB.rank;
+  const len = Math.max(handA.kickers.length, handB.kickers.length);
+  for (let i = 0; i < len; i++) {
+    const a = handA.kickers[i] ?? 0;
+    const b = handB.kickers[i] ?? 0;
+    if (a !== b) return a - b;
+  }
+  return 0;
+}
+
+// ディーラーAI（カードチェンジ判断）：標準的なビデオポーカー戦略の簡易版。
+// 役の構成要素（ペア以上）はキープし、それ以外を交換する。役がなければ最高
+// ランク1枚だけ残して残り4枚を交換する単純化した戦略（実装判断、実証後に調整可）。
+function decideDealerDiscards(cards) {
+  const ranks = cards.map(c => RANK_VALUES[c.rank]);
+  const rankCounts = {};
+  ranks.forEach(r => { rankCounts[r] = (rankCounts[r] || 0) + 1; });
+  const pairedRanks = Object.entries(rankCounts).filter(([, c]) => c >= 2).map(([r]) => Number(r));
+  if (pairedRanks.length > 0) {
+    // ペア以上の役を構成するカードは残し、それ以外を交換
+    return cards.map((c, i) => !pairedRanks.includes(ranks[i]));
+  }
+  // 役なし：最高ランク1枚のみキープ
+  const maxRank = Math.max(...ranks);
+  let kept = false;
+  return cards.map((c, i) => {
+    if (!kept && ranks[i] === maxRank) { kept = true; return false; }
+    return true;
+  });
+}
+
+// ---------- ポーカーのカード見た目（3Dメッシュ・テクスチャ） ----------
+// カードアセット：デザイン関係/ポーカー　参考/_生成カード/新しいフォルダー/ を
+// tools/optimize_cards.py で512px幅・JPEG化して軽量化したもの（assets/cards/）。
+// 通常画像は各カードの絵柄、_metal.pngは金線部分のみ白いmetalnessMap用マスク
+// （ハート/ダイヤ=金、スペード/クラブ=銀の反射をThree.js実装時に付ける）。
+const CARD_TEX_LOADER = new THREE.TextureLoader();
+const CARD_TEX_CACHE = new Map(); // key -> { map, metalMap }
+function cardAssetName(card) {
+  return card.rank === 'JOKER' ? 'Joker' : `${card.rank}_of_${card.suit}`;
+}
+function loadCardTexture(name) {
+  if (CARD_TEX_CACHE.has(name)) return CARD_TEX_CACHE.get(name);
+  const map = CARD_TEX_LOADER.load(`assets/cards/${name}.jpg`);
+  map.colorSpace = THREE.SRGBColorSpace;
+  const metalMap = CARD_TEX_LOADER.load(`assets/cards/${name}_metal.png`);
+  const entry = { map, metalMap };
+  CARD_TEX_CACHE.set(name, entry);
+  return entry;
+}
+// ポーカー発動前にゲーム起動時から静かにプリロードしておく（52枚+ジョーカー、3.5MB程度）
+for (const s of CARD_SUITS) for (const r of CARD_RANKS) loadCardTexture(`${r}_of_${s}`);
+loadCardTexture('Joker');
+
+const CARD_W = 1.15;
+const CARD_H = CARD_W * (1260 / 900); // 元画像の縦横比(900x1260)に合わせる
+const CARD_THICKNESS = 0.012;
+const cardBackMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0a, roughness: 0.5, metalness: 0.15 });
+const cardEdgeMat = new THREE.MeshStandardMaterial({ color: 0x1a1408, roughness: 0.6, metalness: 0.1 });
+
+// faceUp=false: 裏向き（テツさま指示＝専用背面デザインは作らずフラットな黒）
+// faceUp=true: 表向き（カード種別に応じたテクスチャ＋metalnessMap）
+function createCardMesh(card, faceUp) {
+  const geo = new THREE.BoxGeometry(CARD_W, CARD_H, CARD_THICKNESS);
+  let frontMat;
+  if (faceUp) {
+    const tex = loadCardTexture(cardAssetName(card));
+    frontMat = new THREE.MeshStandardMaterial({
+      map: tex.map, metalnessMap: tex.metalMap, metalness: 1.0, roughness: 0.35,
+    });
+  } else {
+    frontMat = cardBackMat;
+  }
+  // 選択中のハイライト表現用に縁のマテリアルはカードごとに複製する（共有だと全カードに影響するため）
+  const edgeMat = cardEdgeMat.clone();
+  // BoxGeometryの面順は [+x,-x,+y,-y,+z,-z]。+zを正面（表）として扱う。
+  const mats = [edgeMat, edgeMat, edgeMat, edgeMat, frontMat, cardBackMat];
+  const mesh = new THREE.Mesh(geo, mats);
+  mesh.castShadow = true;
+  mesh.userData.edgeMat = edgeMat;
+  return mesh;
+}
+function setCardSelectedVisual(mesh, selected) {
+  mesh.userData.edgeMat.emissive.setHex(selected ? 0xffcc33 : 0x000000);
+  mesh.userData.edgeMat.emissiveIntensity = selected ? 1.4 : 1.0;
+}
+
+// ---------- ポーカー進行管理（(54)Step7） ----------
+// アーチ穴（Step6）に10枚溜まったら発動。登場演出＝プッシャー奥の壁に急に1枚ずつ並ぶ。
+// プレイヤーは手札をマウスで選択→カードチェンジ（最大2回）→勝負する、の流れ。
+// ディーラーは人物を出さずカードのみで表現し、標準的なビデオポーカー戦略でチェンジする。
+const pokerCardGroup = new THREE.Group();
+scene.add(pokerCardGroup);
+
+// 【正直な記録】初版はCARD_W=0.62・Y=1.35/2.05で実装したが、スクリーンショットで
+// コインの山と壁際に埋もれてほとんど視認できないことが判明（JPタワー(Step3)で
+// 得た「壁の内側・小さいサイズは既定カメラから見えにくい」教訓と同じ問題）。
+// カードサイズを約2倍に拡大し、間隔も比例して広げた。
+const POKER_CARD_SPACING = 1.3;
+const POKER_PLAYER_Y = 1.85;
+const POKER_DEALER_Y = 2.85;
+const POKER_CARD_Z = WALL_Z_BACK + 0.42;
+const POKER_DEALER_CARD_Z = WALL_Z_BACK + 0.26;
+const POKER_DEAL_INTERVAL = 0.12;   // カードが1枚ずつ出現する間隔
+const POKER_DEAL_ANIM_DURATION = 0.25;
+const POKER_SELECT_LIFT = 0.18;     // 選択中カードの持ち上げ量
+const POKER_DEALER_THINK_DURATION = 0.9;
+const POKER_SHOWDOWN_REVEAL_DURATION = 1.1;
+const POKER_RESULT_HOLD_DURATION = 3.0;
+const POKER_CLEAR_DURATION = 1.0;
+
+function pokerCardX(i) { return (i - 2) * POKER_CARD_SPACING; }
+
+let pokerState = 'idle'; // idle|dealing|playerTurn|dealerTurn|showdown|result|clearing
+let pokerAfterDealState = 'playerTurn';
+let pokerDeck = [];
+let playerHand = []; // { card, mesh, selected }
+let dealerHand = []; // { card, mesh }
+let pokerDealQueue = []; // 登場/交換アニメーション待ちのメッシュ
+let pokerDealTimer = 0;
+let pokerDiscardsLeft = 2;
+let pokerStateTimer = 0;
+let pokerClearParticles = [];
+
+const pokerPanelEl = document.getElementById('pokerPanel');
+const pokerHintEl = document.getElementById('pokerHint');
+const btnPokerDiscardEl = document.getElementById('btnPokerDiscard');
+const btnPokerStandEl = document.getElementById('btnPokerStand');
+const pokerResultOverlayEl = document.getElementById('pokerResultOverlay');
+const pokerResultTitleEl = document.getElementById('pokerResultTitle');
+const pokerResultSubEl = document.getElementById('pokerResultSub');
+
+// 役ごとの配当（仮値。「実証後に検討しよう」とのテツさま方針＝実装して実機で試してから調整）
+const HAND_PAYOUT = {
+  highCard: 20, onePair: 24, twoPair: 28, threeOfAKind: 34, straight: 40,
+  flush: 46, fullHouse: 52, fourOfAKind: 58, straightFlush: 60, royalFlush: 60,
+};
+const POKER_LOSE_PAYOUT = 5;
+
+function clearPokerCards() {
+  for (const h of [...playerHand, ...dealerHand]) pokerCardGroup.remove(h.mesh);
+  playerHand = [];
+  dealerHand = [];
+}
+
+function startPoker() {
+  if (pokerState !== 'idle') return;
+  clearPokerCards();
+  pokerDeck = shuffle(makeDeck().filter(c => c.rank !== 'JOKER')); // ドローポーカーはジョーカー抜き52枚
+  pokerDealQueue = [];
+  for (let i = 0; i < 5; i++) {
+    const card = pokerDeck.pop();
+    const mesh = createCardMesh(card, true);
+    mesh.position.set(pokerCardX(i), POKER_PLAYER_Y, POKER_CARD_Z);
+    mesh.scale.setScalar(0.001);
+    pokerCardGroup.add(mesh);
+    playerHand.push({ card, mesh, selected: false });
+    pokerDealQueue.push(mesh);
+  }
+  for (let i = 0; i < 5; i++) {
+    const card = pokerDeck.pop();
+    // 視点移動で裏側が見えないよう、裏向きカードは表面も裏面と同じ黒マテリアルにする
+    const mesh = createCardMesh(card, false);
+    mesh.position.set(pokerCardX(i), POKER_DEALER_Y, POKER_DEALER_CARD_Z);
+    mesh.scale.setScalar(0.001);
+    pokerCardGroup.add(mesh);
+    dealerHand.push({ card, mesh });
+    pokerDealQueue.push(mesh);
+  }
+  pokerDiscardsLeft = 2;
+  pokerAfterDealState = 'playerTurn';
+  pokerState = 'dealing';
+  pokerDealTimer = 0;
+  pokerPanelEl.classList.remove('show');
+  pokerResultOverlayEl.classList.remove('show');
+}
+
+function refreshPokerHint() {
+  const n = playerHand.filter(h => h.selected).length;
+  pokerHintEl.textContent = `交換したいカードをクリックして選択中: ${n}枚（残り${pokerDiscardsLeft}回）`;
+  btnPokerDiscardEl.disabled = n === 0 || pokerDiscardsLeft <= 0;
+}
+
+function onPlayerDiscardClick() {
+  if (pokerState !== 'playerTurn' || pokerDiscardsLeft <= 0) return;
+  const toReplace = playerHand.filter(h => h.selected);
+  if (toReplace.length === 0) return;
+  pokerDealQueue = [];
+  for (const entry of toReplace) {
+    pokerCardGroup.remove(entry.mesh);
+    const newCard = pokerDeck.pop();
+    const newMesh = createCardMesh(newCard, true);
+    const i = playerHand.indexOf(entry);
+    newMesh.position.set(pokerCardX(i), POKER_PLAYER_Y, POKER_CARD_Z);
+    newMesh.scale.setScalar(0.001);
+    pokerCardGroup.add(newMesh);
+    entry.card = newCard;
+    entry.mesh = newMesh;
+    entry.selected = false;
+    pokerDealQueue.push(newMesh);
+  }
+  pokerDiscardsLeft--;
+  pokerAfterDealState = 'playerTurn';
+  pokerState = 'dealing';
+  pokerDealTimer = 0;
+  pokerPanelEl.classList.remove('show');
+}
+
+function onPlayerStandClick() {
+  if (pokerState !== 'playerTurn') return;
+  pokerPanelEl.classList.remove('show');
+  pokerState = 'dealerTurn';
+  pokerStateTimer = 0;
+}
+
+btnPokerDiscardEl.addEventListener('click', (e) => { e.stopPropagation(); onPlayerDiscardClick(); });
+btnPokerStandEl.addEventListener('click', (e) => { e.stopPropagation(); onPlayerStandClick(); });
+
+// ディーラーのカードチェンジ（標準的なビデオポーカー戦略、decideDealerDiscardsで判断）。
+// まだ裏向きのため見た目の変化はなく、演出上は「考えている」間を置くだけでよい。
+function resolveDealerTurn() {
+  const cards = dealerHand.map(h => h.card);
+  const discardFlags = decideDealerDiscards(cards);
+  dealerHand.forEach((entry, i) => {
+    if (!discardFlags[i]) return;
+    const newCard = pokerDeck.pop();
+    entry.card = newCard; // 裏向きのままなのでメッシュの張り替えは不要
+  });
+  pokerState = 'showdown';
+  pokerStateTimer = 0;
+  // ディーラーの手札を表向きに差し替える（めくる演出のトリガー）
+  dealerHand.forEach((entry, i) => {
+    pokerCardGroup.remove(entry.mesh);
+    const newMesh = createCardMesh(entry.card, true);
+    newMesh.position.set(pokerCardX(i), POKER_DEALER_Y, POKER_DEALER_CARD_Z);
+    newMesh.scale.setScalar(1);
+    pokerCardGroup.add(newMesh);
+    entry.mesh = newMesh;
+  });
+}
+
+function awardGemFromPoker() {
+  const uncollected = [];
+  for (let i = 0; i < GEM_TYPES.length; i++) if (!collectedGems.has(i)) uncollected.push(i);
+  if (uncollected.length === 0) return;
+  const typeIndex = uncollected[Math.floor(Math.random() * uncollected.length)];
+  collectedGems.add(typeIndex);
+  updateGemTrackerUI();
+  jpTowerStage = Math.min(jpTowerStage + 1, JP_TOWER_MAX_STAGE);
+  updateJpTowerVisual();
+  if (collectedGems.size >= GEM_TYPES.length && jackpotState === 'idle') {
+    startJackpot();
+  }
+}
+
+function resolveShowdown() {
+  const playerCards = playerHand.map(h => h.card);
+  const dealerCards = dealerHand.map(h => h.card);
+  const playerResult = evaluateHand(playerCards);
+  const dealerResult = evaluateHand(dealerCards);
+  // プレイヤー対ディーラーの対戦形式。役がいくら強くても負けたら残念賞（引き分けも負け扱い）
+  const win = compareHands(playerResult, dealerResult) > 0;
+
+  let coinReward, gemsAwarded;
+  if (win) {
+    coinReward = HAND_PAYOUT[playerResult.name];
+    // 最高役（スペードのロイヤルストレートフラッシュ）のみ誕生石2個、他の勝ちは1個
+    gemsAwarded = playerResult.name === 'royalFlush' ? 2 : 1;
+  } else {
+    coinReward = POKER_LOSE_PAYOUT;
+    gemsAwarded = 0;
+  }
+  for (let i = 0; i < gemsAwarded; i++) awardGemFromPoker();
+  rainQueueCount += coinReward;
+  rainTimer = 0;
+
+  pokerResultTitleEl.textContent = win
+    ? `WIN！ ${HAND_NAME_JA[playerResult.name]}`
+    : `残念… ${HAND_NAME_JA[playerResult.name]} vs ${HAND_NAME_JA[dealerResult.name]}`;
+  pokerResultSubEl.textContent = win
+    ? `+${coinReward}枚${gemsAwarded > 0 ? `　＋誕生石${gemsAwarded}個` : ''}`
+    : `残念賞 +${coinReward}枚`;
+  pokerResultOverlayEl.classList.add('show');
+
+  pokerState = 'result';
+  pokerStateTimer = 0;
+}
+
+// 退場演出：きらっと光って金色のミストとともに消える（勝敗にかかわらず同じ演出）
+function startPokerClearing() {
+  pokerState = 'clearing';
+  pokerStateTimer = 0;
+  pokerResultOverlayEl.classList.remove('show');
+  pokerClearParticles = [];
+  for (const h of [...playerHand, ...dealerHand]) {
+    for (let k = 0; k < 4; k++) {
+      const mat = new THREE.SpriteMaterial({
+        map: glintTexture, color: 0xffd76a, transparent: true, opacity: 0.9,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      });
+      const spr = new THREE.Sprite(mat);
+      spr.scale.setScalar(0.12 + Math.random() * 0.12);
+      spr.position.copy(h.mesh.position);
+      scene.add(spr);
+      pokerClearParticles.push({
+        sprite: spr,
+        vel: new THREE.Vector3((Math.random() - 0.5) * 0.6, 0.4 + Math.random() * 0.5, (Math.random() - 0.5) * 0.6),
+      });
+    }
+  }
+}
+
+function updatePokerClearing(dt) {
+  const s = Math.min(1, pokerStateTimer / POKER_CLEAR_DURATION);
+  for (const h of [...playerHand, ...dealerHand]) h.mesh.scale.setScalar(Math.max(0.001, 1 - s));
+  for (const p of pokerClearParticles) {
+    p.sprite.position.addScaledVector(p.vel, dt);
+    p.sprite.material.opacity = Math.max(0, 0.9 * (1 - s));
+  }
+  if (s >= 1) {
+    for (const p of pokerClearParticles) scene.remove(p.sprite);
+    pokerClearParticles = [];
+    clearPokerCards();
+    pokerState = 'idle';
+  }
+}
+
+function updatePokerDealing() {
+  let allDone = true;
+  for (let i = 0; i < pokerDealQueue.length; i++) {
+    const startAt = i * POKER_DEAL_INTERVAL;
+    const localT = pokerDealTimer - startAt;
+    if (localT < 0) { allDone = false; continue; }
+    const s = Math.min(1, localT / POKER_DEAL_ANIM_DURATION);
+    pokerDealQueue[i].scale.setScalar(0.001 + 0.999 * s);
+    if (s < 1) allDone = false;
+  }
+  if (allDone) {
+    pokerDealQueue = [];
+    pokerState = pokerAfterDealState;
+    pokerStateTimer = 0;
+    if (pokerState === 'playerTurn') {
+      pokerPanelEl.classList.add('show');
+      refreshPokerHint();
+    }
+  }
+}
+
+function updatePoker(dt) {
+  // 選択中のプレイヤーカードは少し持ち上がる（dealing/clearing中はここでは動かさない）
+  if (pokerState === 'playerTurn' || pokerState === 'dealerTurn' || pokerState === 'showdown' || pokerState === 'result') {
+    for (const h of playerHand) {
+      const targetY = POKER_PLAYER_Y + (h.selected ? POKER_SELECT_LIFT : 0);
+      h.mesh.position.y += (targetY - h.mesh.position.y) * Math.min(1, dt * 8);
+    }
+  }
+  switch (pokerState) {
+    case 'dealing':
+      pokerDealTimer += dt;
+      updatePokerDealing();
+      break;
+    case 'dealerTurn':
+      pokerStateTimer += dt;
+      if (pokerStateTimer > POKER_DEALER_THINK_DURATION) resolveDealerTurn();
+      break;
+    case 'showdown':
+      pokerStateTimer += dt;
+      if (pokerStateTimer > POKER_SHOWDOWN_REVEAL_DURATION) resolveShowdown();
+      break;
+    case 'result':
+      pokerStateTimer += dt;
+      if (pokerStateTimer > POKER_RESULT_HOLD_DURATION) startPokerClearing();
+      break;
+    case 'clearing':
+      pokerStateTimer += dt;
+      updatePokerClearing(dt);
+      break;
+  }
+}
+
 // ---------- ルーレット（穴に10枚たまったら起動するボーナス抽選） ----------
 // 穴に落ちた10枚はスコアにはならない特別枠（相談で確定済み）。ルーレットの結果は
 // 「当選ボーナス分のコインが画面上から山へ降り注ぐ」演出で受け取る。降ってきたコインは
@@ -2214,6 +2662,23 @@ function insertAtClient(clientX, clientY) {
 }
 
 renderer.domElement.addEventListener('pointerdown', (e) => {
+  if (pokerState === 'playerTurn') {
+    // ポーカー中はカード選択のみ受け付け、通常のコイン投入は行わない
+    pointerNDC.x = (e.clientX / window.innerWidth) * 2 - 1;
+    pointerNDC.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    raycaster.setFromCamera(pointerNDC, camera);
+    const hits = raycaster.intersectObjects(playerHand.map(h => h.mesh), false);
+    if (hits.length > 0) {
+      const entry = playerHand.find(h => h.mesh === hits[0].object);
+      if (entry) {
+        entry.selected = !entry.selected;
+        setCardSelectedVisual(entry.mesh, entry.selected);
+        refreshPokerHint();
+      }
+    }
+    return;
+  }
+  if (pokerState !== 'idle') return; // ポーカー進行中（dealing/dealerTurn等）はコイン投入も無効化
   if (productionMode) return; // 本番モードはレーン投入のみ。画面クリックでの直接投入は無効化する
   insertAtClient(e.clientX, e.clientY);
 });
@@ -2644,7 +3109,9 @@ function animate() {
       holeCount++;
       if (holeCount >= HOLE_GOAL) {
         holeCount = 0;
-        startRoulette(); // TODO(Step7): ポーカー発動に差し替え
+        // 【(54)Step7】ポーカー発動に差し替え。既に進行中（idle以外）なら新規発動はせず、
+        // holeCountのリセットのみ行う（次のサイクルから通常通りカウントする実装判断）
+        if (pokerState === 'idle') startPoker();
       }
     }
   }
@@ -3025,6 +3492,8 @@ function animate() {
   pusherMesh.scale.z = halfLen * 2;
   pusherMesh.position.copy(pusherBody.position);
   pusherMesh.quaternion.copy(pusherBody.quaternion);
+
+  updatePoker(dt);
 
   controls.update();
   renderer.render(scene, camera);
