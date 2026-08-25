@@ -703,34 +703,8 @@ function updateTowerFillVisual() {
   railFillMesh.geometry = newGeo;
 }
 
-// ---------- 床中央の穴（ルーレット抽選用の投入口） ----------
-// 実際に貫通した3D穴を作る（CSGが必要）のは大がかりになるため、床の上に
-// 「穴に見える」黒い円盤＋発光リングを重ねる見た目だけの表現にしている。
-// 物理的な当たり判定は持たず、コインのXZ座標がこの円の中に入り、かつ
-// ほぼ床の高さ（＝一番下の層）にあるかどうかをメインループで毎フレーム判定する。
-const HOLE_CENTER_X = 0;
-const HOLE_CENTER_Z = -0.1; // 床ジオメトリの中心Zと一致（床の「ど真ん中」）
-const HOLE_RADIUS = 0.5;
-const HOLE_Y_MAX = 0.13; // これより高い位置（山の上の方）にあるコインは対象外
+// ---------- 穴の共通ゴール数（アーチ機構・(54)で使用） ----------
 const HOLE_GOAL = 10;
-
-{
-  const holeDecal = new THREE.Mesh(
-    new THREE.CircleGeometry(HOLE_RADIUS, 32),
-    new THREE.MeshStandardMaterial({ color: 0x030308, roughness: 0.9, metalness: 0 })
-  );
-  holeDecal.rotation.x = -Math.PI / 2;
-  holeDecal.position.set(HOLE_CENTER_X, 0.006, HOLE_CENTER_Z);
-  scene.add(holeDecal);
-
-  const holeRing = new THREE.Mesh(
-    new THREE.RingGeometry(HOLE_RADIUS, HOLE_RADIUS + 0.05, 32),
-    new THREE.MeshStandardMaterial({ color: 0xffcc33, emissive: 0x553300, roughness: 0.4, metalness: 0.6 })
-  );
-  holeRing.rotation.x = -Math.PI / 2;
-  holeRing.position.set(HOLE_CENTER_X, 0.007, HOLE_CENTER_Z);
-  scene.add(holeRing);
-}
 
 // ---------- せき止め傾斜（跳ね橋のように後端を軸に前が持ち上がる坂） ----------
 // 壁でせき止めるのではなく、登り坂にすることで「落ちそうで落ちない」じれったさを出す。
@@ -828,58 +802,52 @@ pusherBody.addShape(pusherShape);
 pusherBody.position.set(0, PUSHER_HALF_HEIGHT, PUSHER_BACK_Z + PUSHER_HALF_LEN_CENTER);
 world.addBody(pusherBody);
 
-// ---------- プッシャー上の穴ギミック（Step5、2026-08-23ヒアリング結果） ----------
-// プッシャーの中心Z（＝プッシャー自体の伸縮運動によって前後する「動く的」）に、
-// 独立した一定周期（開2秒／閉1秒、暫定値）で開閉するカジノ風スライドドアを設置する。
-// 開いている間にプッシャー上のコインがこの位置へ来ると、床中央の穴と全く同じ扱いで
-// 吸い込み、holeCountへ合算する（別カウントにしない、というテツさま指示）。
-// 床の穴と同様、実際に貫通した物理穴は作らず、見た目（デカール＋スライドするパネル）と
-// メインループでの座標判定だけで表現する。
-const PUSHER_DOOR_RADIUS = 0.5;
-const PUSHER_DOOR_Y_MIN = 0.15;  // プッシャー天面（2*PUSHER_HALF_HEIGHT=0.28）よりわずかに低い位置から
-const PUSHER_DOOR_Y_MAX = 0.65;  // これより高い（山になっている）コインは対象外
-const PUSHER_DOOR_OPEN_DURATION = 2.0;   // 秒（暫定値・要実機確認）
-const PUSHER_DOOR_CLOSED_DURATION = 1.0; // 秒（暫定値・要実機確認）
-const PUSHER_DOOR_SLIDE_DIST = PUSHER_DOOR_RADIUS * 1.3;
-const PUSHER_DOOR_SLIDE_SPEED = 4.0; // スライド移動の速さ（0〜1を何秒で移動するか の逆数目安）
+// ---------- プッシャー先端の穴アーチ（(54)、Step5のスライドドア＋床中央の穴を統合置換） ----------
+// テツさまが実物のコインプッシャー機を見学して着想（参考写真：デザイン関係/8.25見学結果/IMG_6907.HEIC＝
+// プッシャー手前のヘリに「START」と書かれたアーチ状の穴が横並びに配置されている）。
+// 床の中央の穴・Step5のスライドドア（独立周期の開閉）はどちらも廃止し、
+// 「プッシャー先端＝コインの落下境界そのもの」にアーチ状の穴を新設する方式に一本化。
+// アーチはプッシャー本体に固定され、往復運動（伸縮）と一体で前後に動く。
+// 開閉タイマーは持たない＝常時「通過可能」。実際にアーチの位置を通ったコインだけを
+// 1/10としてカウントするB方式（アーチの左右からこぼれ落ちたコインは通常得点にはなるが
+// このカウントには入らない）。Ver1では中央に1つだけ実装（Ver2以降でゲーム種類分に拡張予定）。
+const PUSHER_ARCH_RADIUS = 0.42;
+const PUSHER_ARCH_LEG_HEIGHT = 0.4;
+// 判定Y範囲（コインの絶対Y座標）。「くぐる」対象は主に床面付近のヘリのコイン
+// （プッシャー先端に押されて前へ出る瞬間はY≈コイン厚み程度と低い）のため、
+// 床面ぎりぎりから山の高さも見込んだ範囲にする
+const PUSHER_ARCH_Y_MIN = -0.02;
+const PUSHER_ARCH_Y_MAX = 0.9;
 
-const pusherDoorGroup = new THREE.Group();
-const pusherDoorHoleDecal = new THREE.Mesh(
-  new THREE.CircleGeometry(PUSHER_DOOR_RADIUS, 24),
+const pusherArchGroup = new THREE.Group();
+// くぐる穴の黒いデカール（アーチの真下、プッシャー天面に貼り付く）
+const pusherArchHoleDecal = new THREE.Mesh(
+  new THREE.CircleGeometry(PUSHER_ARCH_RADIUS, 24),
   new THREE.MeshStandardMaterial({ color: 0x030308, roughness: 0.9, metalness: 0 })
 );
-pusherDoorHoleDecal.rotation.x = -Math.PI / 2;
-pusherDoorGroup.add(pusherDoorHoleDecal);
+pusherArchHoleDecal.rotation.x = -Math.PI / 2;
+pusherArchHoleDecal.position.y = 0.001;
+pusherArchGroup.add(pusherArchHoleDecal);
 
-const pusherDoorRing = new THREE.Mesh(
-  new THREE.RingGeometry(PUSHER_DOOR_RADIUS, PUSHER_DOOR_RADIUS + 0.06, 24),
-  new THREE.MeshStandardMaterial({ color: 0xffcc33, emissive: 0x553300, roughness: 0.35, metalness: 0.7 })
-);
-pusherDoorRing.rotation.x = -Math.PI / 2;
-pusherDoorRing.position.y = 0.001;
-pusherDoorGroup.add(pusherDoorRing);
+// アーチ本体（トーラスの半円＝門型フレーム、参考写真の金属アーチを再現）
+// TorusGeometryはXY平面上（Z軸が法線）に構築され、arc=PIだと角度0(X+)→π/2(Y+)→π(X-)を
+// 通る上向きの半円になるため、追加の回転は不要
+const archTorusGeo = new THREE.TorusGeometry(PUSHER_ARCH_RADIUS, 0.045, 12, 24, Math.PI);
+const archMat = new THREE.MeshStandardMaterial({ color: 0xffcc33, metalness: 0.7, roughness: 0.3, emissive: 0x553300 });
+const pusherArchFrame = new THREE.Mesh(archTorusGeo, archMat);
+pusherArchFrame.position.y = PUSHER_ARCH_LEG_HEIGHT;
+pusherArchFrame.castShadow = true;
+pusherArchGroup.add(pusherArchFrame);
+// アーチの脚（左右の柱、半円の両端からプッシャー天面まで下ろす）
+const archLegGeo = new THREE.CylinderGeometry(0.045, 0.045, PUSHER_ARCH_LEG_HEIGHT, 10);
+const archLegL = new THREE.Mesh(archLegGeo, archMat);
+archLegL.position.set(-PUSHER_ARCH_RADIUS, PUSHER_ARCH_LEG_HEIGHT / 2, 0);
+pusherArchGroup.add(archLegL);
+const archLegR = new THREE.Mesh(archLegGeo, archMat);
+archLegR.position.set(PUSHER_ARCH_RADIUS, PUSHER_ARCH_LEG_HEIGHT / 2, 0);
+pusherArchGroup.add(archLegR);
 
-// スライドドア本体（カジノ風の赤×金パネル）。閉じている間は穴の真上を覆い、
-// 開くとX方向へスライドして退避し、下のデカールが露出する
-const pusherDoorPanel = new THREE.Mesh(
-  new THREE.BoxGeometry(PUSHER_DOOR_RADIUS * 2.1, 0.05, PUSHER_DOOR_RADIUS * 2.1),
-  new THREE.MeshStandardMaterial({ color: 0x8a1030, metalness: 0.5, roughness: 0.4, emissive: 0x2a0510 })
-);
-pusherDoorPanel.castShadow = true;
-pusherDoorPanel.position.y = 0.03;
-pusherDoorGroup.add(pusherDoorPanel);
-const pusherDoorPanelTrim = new THREE.Mesh(
-  new THREE.RingGeometry(PUSHER_DOOR_RADIUS * 0.92, PUSHER_DOOR_RADIUS * 1.02, 24),
-  new THREE.MeshStandardMaterial({ color: 0xffd76a, metalness: 0.8, roughness: 0.25 })
-);
-pusherDoorPanelTrim.rotation.x = -Math.PI / 2;
-pusherDoorPanelTrim.position.y = 0.056;
-pusherDoorGroup.add(pusherDoorPanelTrim);
-scene.add(pusherDoorGroup);
-
-let pusherDoorTimer = 0;
-let pusherDoorOpen = false;
-let pusherDoorPanelSlide = 0; // 0=閉（穴を覆っている）、1=開（スライドして退避済み）
+scene.add(pusherArchGroup);
 
 // ---------- コイン管理 ----------
 // テツさま指示（2026-08-13、コイン参考画像）：豪華なカジノトークン風の彫刻デザインに
@@ -2499,20 +2467,10 @@ function animate() {
   // 毎フレーム「奥端固定」の正しい位置に直接引き戻す
   pusherBody.position.z = PUSHER_BACK_Z + halfLen;
 
-  // 【Step5】プッシャー上のスライドドア：独立した一定周期で開閉する。位置はプッシャーの
-  // 中心Z（伸縮運動の中でも常にプッシャー上に乗っている点）へ毎フレーム追従させる
-  pusherDoorTimer += dt;
-  const doorPhaseDuration = pusherDoorOpen ? PUSHER_DOOR_OPEN_DURATION : PUSHER_DOOR_CLOSED_DURATION;
-  if (pusherDoorTimer >= doorPhaseDuration) {
-    pusherDoorTimer = 0;
-    pusherDoorOpen = !pusherDoorOpen;
-  }
-  const doorSlideTarget = pusherDoorOpen ? 1 : 0;
-  const doorSlideDelta = doorSlideTarget - pusherDoorPanelSlide;
-  pusherDoorPanelSlide += Math.sign(doorSlideDelta) * Math.min(Math.abs(doorSlideDelta), PUSHER_DOOR_SLIDE_SPEED * dt);
-  pusherDoorPanel.position.x = pusherDoorPanelSlide * PUSHER_DOOR_SLIDE_DIST;
-  pusherDoorPanelTrim.position.x = pusherDoorPanel.position.x;
-  pusherDoorGroup.position.set(0, PUSHER_HALF_HEIGHT * 2 + 0.005, pusherBody.position.z);
+  // 【(54)】プッシャー先端の穴アーチ：プッシャー本体に固定され、往復運動（伸縮）と
+  // 一体で前後に動く。先端（実際にコインを押す面）のZは中心Z＋halfLen。
+  // 開閉タイマーは持たない＝常時「通過可能」（実物の参考写真と同じ固定アーチ）
+  pusherArchGroup.position.set(0, PUSHER_HALF_HEIGHT * 2 + 0.005, pusherBody.position.z + halfLen);
 
   if (autoInsert) {
     autoTimer += dt;
@@ -2682,34 +2640,18 @@ function animate() {
       world.removeBody(c.body);
       coins.splice(i, 1);
     } else if (
-      c.body.position.y < HOLE_Y_MAX &&
-      Math.hypot(c.body.position.x - HOLE_CENTER_X, c.body.position.z - HOLE_CENTER_Z) < HOLE_RADIUS
+      c.body.position.y > PUSHER_ARCH_Y_MIN && c.body.position.y < PUSHER_ARCH_Y_MAX &&
+      Math.hypot(c.body.position.x - pusherArchGroup.position.x, c.body.position.z - pusherArchGroup.position.z) < PUSHER_ARCH_RADIUS
     ) {
-      // 床の一番下の層にいて、穴の真上に来たコインを吸い込む（スコアにはならない特別枠）
-      holeCoinsFalling.push({ mesh: c.mesh, t: 0, vy: 0 });
-      world.removeBody(c.body);
-      coins.splice(i, 1);
-      holeCount++;
-      // 【(51)】シャンパンタワーの供給源はルーレット報酬コインのみに変更したため、
-      // 穴に入るたびの演出（旧ブランデーグラスの溜まり）はここでは行わない
-      if (holeCount >= HOLE_GOAL) {
-        holeCount = 0;
-        startRoulette();
-      }
-    } else if (
-      pusherDoorOpen &&
-      c.body.position.y > PUSHER_DOOR_Y_MIN && c.body.position.y < PUSHER_DOOR_Y_MAX &&
-      Math.hypot(c.body.position.x - pusherDoorGroup.position.x, c.body.position.z - pusherDoorGroup.position.z) < PUSHER_DOOR_RADIUS
-    ) {
-      // 【Step5】プッシャー上のスライドドアが開いている間にここへ来たコイン。
-      // 床中央の穴と全く同じ扱いで吸い込み、holeCountへ合算する（別カウントにしない、テツさま指示）
+      // 【(54)】プッシャー先端の穴アーチを実際に通ったコイン（B方式）。
+      // アーチの左右からこぼれ落ちたコインは通常得点にはなるが、このカウントには入らない。
       holeCoinsFalling.push({ mesh: c.mesh, t: 0, vy: 0 });
       world.removeBody(c.body);
       coins.splice(i, 1);
       holeCount++;
       if (holeCount >= HOLE_GOAL) {
         holeCount = 0;
-        startRoulette();
+        startRoulette(); // TODO(Step7): ポーカー発動に差し替え
       }
     }
   }
