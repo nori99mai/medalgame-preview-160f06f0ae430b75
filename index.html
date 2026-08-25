@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<title>コインプッシャー 3D（性能テスト）</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg-deep: #0a0912;
+    --panel: rgba(18, 14, 32, 0.55);
+    --panel-border: rgba(255, 213, 74, 0.12);
+    --gold: #ffd54a;
+    --gold-glow: rgba(255, 197, 74, 0.55);
+    --ink: #f4f1ff;
+    --action-red: #e8532f;
+    --action-red-shadow: #a5391c;
+    --action-blue: #3a6de0;
+    --action-blue-shadow: #24479a;
+    --action-green: #2fae5c;
+    --action-green-shadow: #1c7a3f;
+    --action-purple: #8e5fc7;
+    --action-purple-shadow: #5b3a86;
+  }
+  html, body {
+    margin: 0; padding: 0; overflow: hidden; height: 100%;
+    background: var(--bg-deep);
+  }
+  body {
+    background:
+      radial-gradient(ellipse 90% 60% at 50% 0%, rgba(90, 60, 150, 0.25), transparent 60%),
+      radial-gradient(ellipse 120% 90% at 50% 120%, rgba(60, 30, 90, 0.35), transparent 70%),
+      var(--bg-deep);
+  }
+  canvas { display: block; touch-action: none; }
+  #ui {
+    position: fixed; top: 0; left: 0; width: 100%;
+    display: flex; justify-content: space-between; align-items: flex-start;
+    padding: 14px 18px; box-sizing: border-box;
+    font-family: "Segoe UI", "Hiragino Sans", sans-serif; color: var(--ink);
+    pointer-events: none;
+  }
+  #ui .panel {
+    pointer-events: auto;
+    background: var(--panel); border: 1px solid var(--panel-border);
+    border-radius: 10px; backdrop-filter: blur(2px);
+  }
+  #score {
+    font-size: 30px; font-weight: 800; letter-spacing: 0.02em; color: var(--gold);
+    padding: 8px 20px; border-radius: 10px;
+    text-shadow: 0 0 14px var(--gold-glow), 0 1px 2px rgba(0,0,0,0.6);
+    font-variant-numeric: tabular-nums;
+  }
+  #stats {
+    font-size: 13px; line-height: 1.7; text-align: right; color: rgba(244,241,255,0.85);
+    padding: 8px 14px; border-radius: 10px;
+    font-variant-numeric: tabular-nums;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+  }
+  #credit {
+    font-size: 18px; font-weight: 800; letter-spacing: 0.01em; color: var(--gold);
+    padding: 8px 16px; border-radius: 10px;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+    font-variant-numeric: tabular-nums;
+  }
+  #controls {
+    position: fixed; bottom: 0; left: 0; width: 100%;
+    display: flex; justify-content: center; gap: 10px; flex-wrap: wrap;
+    padding: 18px; box-sizing: border-box;
+  }
+  #controls button {
+    font-family: inherit; font-size: 15px; font-weight: 700; letter-spacing: 0.01em;
+    padding: 12px 20px; border-radius: 10px; border: none;
+    cursor: pointer; color: #fff; background: var(--action-red);
+    box-shadow: 0 3px 0 var(--action-red-shadow); user-select: none;
+  }
+  #controls button:active { box-shadow: 0 1px 0 var(--action-red-shadow); transform: translateY(2px); }
+  #controls button.secondary { background: var(--action-blue); box-shadow: 0 3px 0 var(--action-blue-shadow); }
+  #controls button.secondary:active { box-shadow: 0 1px 0 var(--action-blue-shadow); }
+  #controls button.toggled { background: var(--action-green); box-shadow: 0 3px 0 var(--action-green-shadow); }
+  #controls button.gem { background: var(--action-purple); box-shadow: 0 3px 0 var(--action-purple-shadow); }
+  #controls button.gem:active { box-shadow: 0 1px 0 var(--action-purple-shadow); }
+  #controls button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+  /* 本番モードでは投入手段をレーンのみに絞るため、テスト専用の投入・演出トリガーを非表示にする
+     （削除ではなく非表示。テストモードに戻せば元通り使える） */
+  body.production-mode .test-only { display: none !important; }
+  #btnModeToggle { background: #555; box-shadow: 0 3px 0 #2e2e2e; }
+  #btnModeToggle.toggled { background: var(--action-green); box-shadow: 0 3px 0 var(--action-green-shadow); }
+  #btnModeToggle:active { box-shadow: 0 1px 0 #2e2e2e; }
+  #railSliderWrap {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--panel); border: 1px solid var(--panel-border);
+    border-radius: 10px; padding: 0 14px; color: var(--ink);
+    font-size: 13px; user-select: none;
+  }
+  #railSliderWrap input[type="range"] { accent-color: var(--gold); width: 120px; }
+  #hint {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    color: rgba(244,241,255,0.55); font-family: "Segoe UI", "Hiragino Sans", sans-serif; font-size: 14px;
+    pointer-events: none; text-align: center; text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+  }
+  /* コイン落とし側の視界を塞がないよう、画面全体を暗転させず左側に寄せて表示する
+     （中央に出すとコインの山が完全に見えなくなるとの指摘を受けて変更） */
+  #rouletteOverlay {
+    position: fixed; inset: 0; display: none; align-items: center; justify-content: flex-start;
+    padding-left: min(4vw, 48px);
+    background: transparent;
+    z-index: 20;
+  }
+  #rouletteOverlay.show { display: flex; }
+  #rouletteBox {
+    padding: 3px;
+    border-radius: 22px;
+    background: linear-gradient(135deg, #fff6da, #8a6a1f 35%, #f3d98b 60%, #7a5a1a);
+    box-shadow: 0 0 50px rgba(202, 165, 61, 0.35), 0 24px 70px rgba(0,0,0,0.65);
+  }
+  #rouletteBoxInner {
+    display: flex; flex-direction: column; align-items: center; gap: 16px;
+    padding: 30px 46px 34px;
+    border-radius: 20px;
+    background: radial-gradient(ellipse at 50% 0%, #2a1114, #0c0507 75%);
+    font-family: Georgia, "Hiragino Mincho ProN", serif;
+  }
+  #rouletteTitle {
+    font-size: 14px; letter-spacing: 0.3em; color: #d9b65c; text-transform: uppercase;
+    text-shadow: 0 0 12px rgba(217,182,92,0.5);
+  }
+  #rouletteWheelWrap {
+    position: relative;
+    filter: drop-shadow(0 10px 20px rgba(0,0,0,0.65));
+  }
+  #rouletteWheel { border-radius: 50%; }
+  #roulettePointer {
+    position: absolute; top: -20px; left: 50%; transform: translateX(-50%);
+    width: 0; height: 0; border-left: 12px solid transparent; border-right: 12px solid transparent;
+    border-top: 22px solid #d9b65c; filter: drop-shadow(0 2px 3px rgba(0,0,0,0.7));
+  }
+  #roulettePointer::after {
+    content: ""; position: absolute; top: -27px; left: -5px; width: 10px; height: 10px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #fff6da, #8a1030 75%);
+    box-shadow: 0 0 8px rgba(217,182,92,0.9);
+  }
+  #rouletteResult {
+    font-size: 32px; font-weight: 700; letter-spacing: 0.02em;
+    min-height: 42px;
+    background: linear-gradient(180deg, #fff6da, #d9b65c 55%, #8a6a1f);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    filter: drop-shadow(0 0 14px rgba(217,182,92,0.45));
+  }
+  #gemPanel {
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    padding: 8px 14px; font-size: 12px;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+  }
+  #gemDots { display: flex; gap: 4px; }
+  #gemDots .dot {
+    width: 11px; height: 11px; border-radius: 50%;
+    opacity: 0.28; filter: grayscale(1);
+    box-shadow: inset 0 0 2px rgba(0,0,0,0.7);
+    transition: opacity 0.3s ease, filter 0.3s ease, box-shadow 0.3s ease;
+  }
+  #gemDots .dot.collected {
+    opacity: 1; filter: none;
+    box-shadow: 0 0 7px currentColor, inset 0 0 2px rgba(255,255,255,0.6);
+  }
+  /* ジャックポットはルーレットと違い、12種類そろえた達成の演出として稀にしか出ないため、
+     中央に大きく見せる（頻出するルーレットは視界を塞がないよう左寄せにしているのと対比） */
+  #jackpotOverlay {
+    position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    background:
+      radial-gradient(ellipse 70% 60% at 50% 45%, rgba(70, 40, 12, 0.45), transparent 70%),
+      rgba(4, 2, 8, 0.55);
+    z-index: 21;
+  }
+  #jackpotOverlay.show { display: flex; }
+  #jackpotBox {
+    padding: 3px;
+    border-radius: 22px;
+    background: linear-gradient(135deg, #fff6da, #8a6a1f 35%, #f3d98b 60%, #7a5a1a);
+    box-shadow: 0 0 60px rgba(202, 165, 61, 0.45), 0 24px 80px rgba(0,0,0,0.7);
+  }
+  #jackpotBoxInner {
+    display: flex; flex-direction: column; align-items: center; gap: 18px;
+    padding: 32px 44px 36px;
+    border-radius: 20px;
+    background: radial-gradient(ellipse at 50% 0%, #2a1a0c, #0c0705 75%);
+    font-family: Georgia, "Hiragino Mincho ProN", serif;
+  }
+  #jackpotTitle {
+    font-size: 15px; letter-spacing: 0.32em; color: #d9b65c; text-transform: uppercase;
+    text-shadow: 0 0 14px rgba(217,182,92,0.6);
+  }
+  #jackpotReels {
+    display: flex; gap: 10px; padding: 12px; border-radius: 12px;
+    background: #0a0508;
+    box-shadow: inset 0 0 20px rgba(0,0,0,0.85), 0 0 0 2px rgba(217,182,92,0.4);
+  }
+  #jackpotReels .reel {
+    width: 56px; height: 56px; overflow: hidden; border-radius: 6px;
+    background: #150a10; position: relative;
+  }
+  #jackpotReels .reelStrip { display: flex; flex-direction: column; will-change: transform; }
+  #jackpotReels .sym { width: 56px; height: 56px; display: flex; align-items: center; justify-content: center; font-size: 30px; }
+  #jackpotResult {
+    font-size: 30px; font-weight: 700; letter-spacing: 0.02em;
+    min-height: 40px; text-align: center;
+    background: linear-gradient(180deg, #fff6da, #d9b65c 55%, #8a6a1f);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    filter: drop-shadow(0 0 16px rgba(217,182,92,0.55));
+  }
+  /* 【Step4】JPスロットの目押しヒント（3リールを1本ずつスペースキーで止める）。
+     現在止める対象のリールには.activeで金色の縁取りを付ける */
+  #jackpotAimHint {
+    font-size: 13px; letter-spacing: 0.1em; color: #ffd76a; text-shadow: 0 0 8px rgba(255,215,106,0.6);
+  }
+  #jackpotReels .reel.active {
+    box-shadow: 0 0 0 3px #ffd76a, 0 0 14px 3px rgba(255,215,106,0.7);
+  }
+  /* 【Step4】通常ルーレットの目押しヒント（実際に回転しているホイールをスペースキーで止める） */
+  #rouletteAimHint {
+    font-size: 13px; letter-spacing: 0.1em; color: #ffd76a; text-shadow: 0 0 8px rgba(255,215,106,0.6);
+  }
+  /* 大当たり（JP成功）タワー崩壊の演出。画面全体のフラッシュとキャンバスの軽いシェイク */
+  #jpFlashOverlay {
+    position: fixed; inset: 0; pointer-events: none; z-index: 40; opacity: 0;
+    background: radial-gradient(circle, rgba(255,244,200,0.95) 0%, rgba(255,205,70,0.45) 40%, rgba(255,205,70,0) 74%);
+  }
+  #jpFlashOverlay.flash { animation: jpFlashAnim 0.9s ease-out; }
+  @keyframes jpFlashAnim { 0% { opacity: 0; } 8% { opacity: 1; } 100% { opacity: 0; } }
+  @keyframes jpShakeAnim {
+    0%, 100% { transform: translate(0, 0); }
+    20% { transform: translate(-7px, 4px); }
+    40% { transform: translate(6px, -6px); }
+    60% { transform: translate(-5px, -3px); }
+    80% { transform: translate(6px, 3px); }
+  }
+  canvas.jp-shake { animation: jpShakeAnim 0.4s ease-in-out 2; }
+  /* クレジット0でのGameOver。ルーレット(20)・ジャックポット(21)より前面に出す
+     （プレイ続行不可のブロッキング状態のため、演出中でも最上位で見えるべき） */
+  #gameOverOverlay {
+    position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(4, 2, 8, 0.75);
+    z-index: 22;
+  }
+  #gameOverOverlay.show { display: flex; }
+  #gameOverBox {
+    padding: 3px;
+    border-radius: 22px;
+    background: linear-gradient(135deg, #ff6a4a, #8a1c1c 40%, #f39b6a 65%, #6a1414);
+    box-shadow: 0 0 60px rgba(232, 83, 47, 0.5), 0 24px 80px rgba(0,0,0,0.75);
+  }
+  #gameOverBoxInner {
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+    padding: 40px 56px;
+    border-radius: 20px;
+    background: radial-gradient(ellipse at 50% 0%, #2a0a0a, #0c0505 75%);
+    font-family: Georgia, "Hiragino Mincho ProN", serif;
+    text-align: center;
+  }
+  #gameOverTitle {
+    font-size: 40px; font-weight: 800; letter-spacing: 0.15em; color: #ff8a6a;
+    text-shadow: 0 0 20px rgba(255,106,74,0.7);
+  }
+  #gameOverSub {
+    font-size: 14px; color: rgba(244,241,255,0.75);
+  }
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <div class="panel" id="score">GET: 0 枚</div>
+  <div class="panel" id="credit">クレジット: 50 枚</div>
+  <div class="panel" id="gemPanel">
+    <div id="gemCount">誕生石: 0 / 12</div>
+    <div id="gemDots"></div>
+  </div>
+  <div class="panel" id="stats">FPS: --<br>コイン数: 0 / 200<br>ホール: 0 / 10</div>
+</div>
+
+<div id="hint">画面をクリック / タップした位置にコインが落ちます</div>
+
+<div id="controls">
+  <button id="btnModeToggle">モード: テスト</button>
+  <button id="btnInsert" class="secondary test-only">コイン投入</button>
+  <button id="btnBall" class="secondary test-only">ボール投入</button>
+  <button id="btnGem" class="secondary gem test-only">宝石投入</button>
+  <button id="btnRailLeft" class="secondary">レーン投入（左）</button>
+  <button id="btnRailRight" class="secondary">レーン投入（右）</button>
+  <div id="railSliderWrap">
+    <span>奥</span>
+    <input type="range" id="railZSlider" min="0" max="100" value="100" />
+    <span>手前</span>
+  </div>
+  <button id="btnAuto" class="test-only">オート投入: OFF</button>
+  <button id="btnBurst" class="test-only">50枚まとめて投入（負荷テスト）</button>
+  <button id="btnForceJackpot" class="secondary test-only">JP発動</button>
+  <button id="btnForceRoulette" class="secondary test-only">ルーレット発動</button>
+  <button id="btnReset" class="secondary">リセット</button>
+</div>
+
+<div id="rouletteOverlay">
+  <div id="rouletteBox">
+    <div id="rouletteBoxInner">
+      <div id="rouletteTitle">Bonus Roulette</div>
+      <div id="rouletteWheelWrap">
+        <canvas id="rouletteWheel" width="260" height="260"></canvas>
+        <div id="roulettePointer"></div>
+      </div>
+      <div id="rouletteAimHint">スペースキーで止めろ！</div>
+      <div id="rouletteResult"></div>
+    </div>
+  </div>
+</div>
+
+<div id="jackpotOverlay">
+  <div id="jackpotBox">
+    <div id="jackpotBoxInner">
+      <div id="jackpotTitle">Jackpot Slot</div>
+      <div id="jackpotReels">
+        <div class="reel" id="reel0"><div class="reelStrip" id="reelStrip0"></div></div>
+        <div class="reel" id="reel1"><div class="reelStrip" id="reelStrip1"></div></div>
+        <div class="reel" id="reel2"><div class="reelStrip" id="reelStrip2"></div></div>
+      </div>
+      <div id="jackpotAimHint">スペースキーでリールを止めろ！</div>
+      <div id="jackpotResult"></div>
+    </div>
+  </div>
+</div>
+
+<div id="jpFlashOverlay"></div>
+
+<div id="gameOverOverlay">
+  <div id="gameOverBox">
+    <div id="gameOverBoxInner">
+      <div id="gameOverTitle">GAME OVER</div>
+      <div id="gameOverSub">クレジットが0になりました。リセットでもう一度プレイできます</div>
+    </div>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "./libs/three.module.min.js",
+    "three/addons/": "./libs/",
+    "cannon-es": "./libs/cannon-es.js"
+  }
+}
+</script>
+<script type="module" src="./main.js"></script>
+</body>
+</html>
