@@ -1844,11 +1844,14 @@ function setCardSelectedVisual(mesh, selected) {
 const pokerCardGroup = new THREE.Group();
 scene.add(pokerCardGroup);
 
-// 【正直な記録】初版はCARD_W=0.62・Y=1.35/2.05で実装したが、スクリーンショットで
-// コインの山と壁際に埋もれてほとんど視認できないことが判明（JPタワー(Step3)で
-// 得た「壁の内側・小さいサイズは既定カメラから見えにくい」教訓と同じ問題）。
-// カードサイズを約2倍に拡大し、間隔も比例して広げた。
+// 【正直な記録・実機フィードバック2026-08-26で修正】初版はCARD_W=0.62・Y=1.35/2.05・
+// 壁の中央配置で実装したが、①スクリーンショットでコインの山と壁際に埋もれてほとんど
+// 視認できないことが判明（JPタワー(Step3)で得た「壁の内側・小さいサイズは既定カメラ
+// から見えにくい」教訓と同じ問題）→カードサイズを約2倍に拡大、②そもそも
+// counseling_log.mdのコアループでは「画面左側に登場演出」と決まっていたのに、実装時に
+// 壁の中央（左右対称）に配置してしまっていた（実装ミス）→X_OFFSETで画面左寄りに変更。
 const POKER_CARD_SPACING = 1.3;
+const POKER_CARD_X_OFFSET = -3.0; // 画面左側に寄せる（元は0=中央だった）
 const POKER_PLAYER_Y = 1.85;
 const POKER_DEALER_Y = 2.85;
 const POKER_CARD_Z = WALL_Z_BACK + 0.42;
@@ -1861,7 +1864,43 @@ const POKER_SHOWDOWN_REVEAL_DURATION = 1.1;
 const POKER_RESULT_HOLD_DURATION = 3.0;
 const POKER_CLEAR_DURATION = 1.0;
 
-function pokerCardX(i) { return (i - 2) * POKER_CARD_SPACING; }
+function pokerCardX(i) { return POKER_CARD_X_OFFSET + (i - 2) * POKER_CARD_SPACING; }
+
+// 【実機フィードバック2026-08-26】既存ライト（sun/spot/accentLight）はプレイフィールド
+// 中央〜手前を照らす配置のため、壁際の高い位置にあるカードまで光が十分届かず、
+// metalnessMapによる金属反射が活きていなかった。カードの手前上方から専用に照らす
+// ライトを追加（カジノのスポットライト演出も兼ねる）。
+const pokerCardLight = new THREE.PointLight(0xfff2d0, 1.8, 9);
+pokerCardLight.position.set(POKER_CARD_X_OFFSET, 3.6, -1.0);
+scene.add(pokerCardLight);
+
+// 【実機フィードバック2026-08-26】カードの奥が真っ黒のままで寂しいとの指摘。正式な
+// デザインは今後別途相談するとして、まずは仮の背景（カジノのカーテン風グラデーション
+// ＋縦のひだ模様）を壁のさらに奥に配置しておく。
+function createPokerBackdropTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512; canvas.height = 256;
+  const ctx = canvas.getContext('2d');
+  const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  grad.addColorStop(0, '#33101c');
+  grad.addColorStop(0.55, '#200a14');
+  grad.addColorStop(1, '#0a0508');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.globalAlpha = 0.12;
+  for (let x = 0; x < canvas.width; x += 22) {
+    ctx.fillStyle = (x / 22) % 2 === 0 ? '#000000' : '#ffd76a';
+    ctx.fillRect(x, 0, 11, canvas.height);
+  }
+  ctx.globalAlpha = 1;
+  return new THREE.CanvasTexture(canvas);
+}
+const pokerBackdropMat = new THREE.MeshStandardMaterial({
+  map: createPokerBackdropTexture(), roughness: 0.85, metalness: 0.05, side: THREE.DoubleSide,
+});
+const pokerBackdrop = new THREE.Mesh(new THREE.PlaneGeometry(7.5, 4.2), pokerBackdropMat);
+pokerBackdrop.position.set(POKER_CARD_X_OFFSET, 2.5, WALL_Z_BACK - 0.05);
+scene.add(pokerBackdrop);
 
 let pokerState = 'idle'; // idle|dealing|playerTurn|dealerTurn|showdown|result|clearing
 let pokerAfterDealState = 'playerTurn';
