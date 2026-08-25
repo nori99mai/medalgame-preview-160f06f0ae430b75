@@ -1850,12 +1850,19 @@ scene.add(pokerCardGroup);
 // から見えにくい」教訓と同じ問題）→カードサイズを約2倍に拡大、②そもそも
 // counseling_log.mdのコアループでは「画面左側に登場演出」と決まっていたのに、実装時に
 // 壁の中央（左右対称）に配置してしまっていた（実装ミス）→X_OFFSETで画面左寄りに変更。
-const POKER_CARD_SPACING = 1.3;
-const POKER_CARD_X_OFFSET = -3.0; // 画面左側に寄せる（元は0=中央だった）
-const POKER_PLAYER_Y = 1.85;
-const POKER_DEALER_Y = 2.85;
-const POKER_CARD_Z = WALL_Z_BACK + 0.42;
-const POKER_DEALER_CARD_Z = WALL_Z_BACK + 0.26;
+const POKER_CARD_SPACING = 1.0;
+// 【2026-08-26再修正】「壁の奥」配置だと視点を動かしても手札がほぼ見えないとの
+// 実機指摘。「視点固定」ではなく、カード自体をプレイフィールド外側・画面左手前
+// （カメラに近く、JPタワーとはZ帯をずらして干渉しない位置）に配置し直した。
+// 【正直な記録】ディーラーカードのZ=2.0がJPタワー（Step3、X=-6.8・Z=2.0/0.0/-2.0の
+// 6本）のうち1本と完全に重なり、ショーダウンで表向きにしたはずのカードがタワーの
+// コインメッシュに埋もれて裏向きのまま止まって見える不具合が発生。JPタワーのZ範囲
+// （-2.0〜2.0）より手前へ完全にずらして分離した。
+const POKER_CARD_X_OFFSET = -6.5; // プレイフィールド外側左（JPタワーと同じX帯、Zで棲み分け）
+const POKER_PLAYER_Y = 1.7;
+const POKER_DEALER_Y = 2.6;
+const POKER_CARD_Z = 3.6;        // 手前（JPタワーのZ範囲より完全に手前）
+const POKER_DEALER_CARD_Z = 3.0; // プレイヤーより少し奥
 const POKER_DEAL_INTERVAL = 0.12;   // カードが1枚ずつ出現する間隔
 const POKER_DEAL_ANIM_DURATION = 0.25;
 const POKER_SELECT_LIFT = 0.18;     // 選択中カードの持ち上げ量
@@ -1871,7 +1878,7 @@ function pokerCardX(i) { return POKER_CARD_X_OFFSET + (i - 2) * POKER_CARD_SPACI
 // metalnessMapによる金属反射が活きていなかった。カードの手前上方から専用に照らす
 // ライトを追加（カジノのスポットライト演出も兼ねる）。
 const pokerCardLight = new THREE.PointLight(0xfff2d0, 1.8, 9);
-pokerCardLight.position.set(POKER_CARD_X_OFFSET, 3.6, -1.0);
+pokerCardLight.position.set(POKER_CARD_X_OFFSET, 3.6, 3.3);
 scene.add(pokerCardLight);
 
 // 【実機フィードバック2026-08-26】カードの奥が真っ黒のままで寂しいとの指摘。正式な
@@ -1898,8 +1905,9 @@ function createPokerBackdropTexture() {
 const pokerBackdropMat = new THREE.MeshStandardMaterial({
   map: createPokerBackdropTexture(), roughness: 0.85, metalness: 0.05, side: THREE.DoubleSide,
 });
-const pokerBackdrop = new THREE.Mesh(new THREE.PlaneGeometry(7.5, 4.2), pokerBackdropMat);
-pokerBackdrop.position.set(POKER_CARD_X_OFFSET, 2.5, WALL_Z_BACK - 0.05);
+const pokerBackdrop = new THREE.Mesh(new THREE.PlaneGeometry(6.5, 4.5), pokerBackdropMat);
+pokerBackdrop.position.set(POKER_CARD_X_OFFSET - 0.3, 2.1, 1.5);
+pokerBackdrop.rotation.y = Math.PI * 0.06; // カメラの方をわずかに向かせる
 scene.add(pokerBackdrop);
 
 let pokerState = 'idle'; // idle|dealing|playerTurn|dealerTurn|showdown|result|clearing
