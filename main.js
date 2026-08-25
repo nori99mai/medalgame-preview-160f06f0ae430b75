@@ -1855,7 +1855,10 @@ function clearPokerCards() {
 }
 
 function startPoker() {
-  if (pokerState !== 'idle') return;
+  // 【dev-review 2026-08-26で発見】本番モードでGameOver（クレジット0）後も、既に
+  // プッシャー上にあるコインの物理演算自体は止まらないため、GameOverオーバーレイ表示中に
+  // アーチを10枚通過してポーカーが発動してしまう不整合があった。ここでガードする。
+  if (pokerState !== 'idle' || gameOver) return;
   clearPokerCards();
   pokerHandAreaEl.classList.add('show');
   pokerDeck = shuffle(makeDeck().filter(c => c.rank !== 'JOKER')); // ドローポーカーはジョーカー抜き52枚
@@ -2678,6 +2681,18 @@ document.addEventListener('keydown', (e) => {
 
 document.getElementById('btnReset').addEventListener('click', (e) => {
   e.stopPropagation();
+  // 【dev-review 2026-08-26で発見】ポーカー進行中（カード選択中・ディーラーターン中等）に
+  // リセットを押すと、コイン・宝石はクリアされるのにポーカーの内部状態・UI（手札表示・
+  // 操作パネル）が残り続け、矛盾した画面になっていた。強制的にidleへ戻す。
+  if (pokerState !== 'idle') {
+    pokerState = 'idle';
+    pokerDealQueue = [];
+    pokerPanelEl.classList.remove('show');
+    pokerResultOverlayEl.classList.remove('show');
+    pokerHandAreaEl.classList.remove('show');
+    clearPokerCards();
+  }
+  holeCount = 0;
   for (const c of coins) {
     scene.remove(c.mesh);
     world.removeBody(c.body);
