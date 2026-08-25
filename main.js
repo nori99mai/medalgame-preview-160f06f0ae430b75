@@ -820,16 +820,10 @@ const PUSHER_ARCH_Y_MIN = -0.02;
 const PUSHER_ARCH_Y_MAX = 0.9;
 
 const pusherArchGroup = new THREE.Group();
-// くぐる穴の黒いデカール（アーチの真下、プッシャー天面に貼り付く）
-const pusherArchHoleDecal = new THREE.Mesh(
-  new THREE.CircleGeometry(PUSHER_ARCH_RADIUS, 24),
-  new THREE.MeshStandardMaterial({ color: 0x030308, roughness: 0.9, metalness: 0 })
-);
-pusherArchHoleDecal.rotation.x = -Math.PI / 2;
-pusherArchHoleDecal.position.y = 0.001;
-pusherArchGroup.add(pusherArchHoleDecal);
 
 // アーチ本体（トーラスの半円＝門型フレーム、参考写真の金属アーチを再現）
+// 2026-08-25追加指示：アーチ下の黒い穴デカールは不要（削除済み）。
+// アーチを通ったコインは吸い込み演出をせず、そのまま床へ普通に落ちる。
 // TorusGeometryはXY平面上（Z軸が法線）に構築され、arc=PIだと角度0(X+)→π/2(Y+)→π(X-)を
 // 通る上向きの半円になるため、追加の回転は不要
 const archTorusGeo = new THREE.TorusGeometry(PUSHER_ARCH_RADIUS, 0.045, 12, 24, Math.PI);
@@ -1686,8 +1680,6 @@ function updateGemTrackerUI() {
 }
 updateGemTrackerUI();
 
-// ---------- 中央の穴に落ちたコインの演出用配列 ----------
-const holeCoinsFalling = []; // { mesh, t, vy }
 let holeCount = 0;
 
 // ---------- ルーレット（穴に10枚たまったら起動するボーナス抽選） ----------
@@ -2053,7 +2045,7 @@ function spawnCoin(worldX, worldY, worldZ, initialVelocity, initialQuaternion, i
   }
   world.addBody(body);
 
-  coins.push({ mesh, body, rollUntil: rollUntil || 0, spawnT: clock.elapsedTime, idleSince: null });
+  coins.push({ mesh, body, rollUntil: rollUntil || 0, spawnT: clock.elapsedTime, idleSince: null, archPassed: false });
 }
 
 function clampSpawnX(x) {
@@ -2640,14 +2632,15 @@ function animate() {
       world.removeBody(c.body);
       coins.splice(i, 1);
     } else if (
+      !c.archPassed &&
       c.body.position.y > PUSHER_ARCH_Y_MIN && c.body.position.y < PUSHER_ARCH_Y_MAX &&
       Math.hypot(c.body.position.x - pusherArchGroup.position.x, c.body.position.z - pusherArchGroup.position.z) < PUSHER_ARCH_RADIUS
     ) {
-      // 【(54)】プッシャー先端の穴アーチを実際に通ったコイン（B方式）。
+      // 【(54)、2026-08-25追加指示】プッシャー先端の穴アーチを実際に通ったコイン（B方式）。
+      // 吸い込み演出はせず、コインは物理ワールドに残したまま床へ普通に落ちる。
+      // 同じコインを同じフレーム跨ぎで何度も数えないよう、通過済みフラグを立てる。
       // アーチの左右からこぼれ落ちたコインは通常得点にはなるが、このカウントには入らない。
-      holeCoinsFalling.push({ mesh: c.mesh, t: 0, vy: 0 });
-      world.removeBody(c.body);
-      coins.splice(i, 1);
+      c.archPassed = true;
       holeCount++;
       if (holeCount >= HOLE_GOAL) {
         holeCount = 0;
@@ -2846,26 +2839,6 @@ function animate() {
     if (f.mesh.position.y < -3) {
       scene.remove(f.mesh);
       fallingCoins.splice(i, 1);
-    }
-  }
-
-  // 穴に吸い込まれたコインの演出：重力加速で沈み込み、床面（Y=0）を下回ったところで
-  // 不透明な床メッシュに隠れて自然に見えなくなるようにする。
-  // 【穴コイン消失バグの修正】以前は0.35秒でスケールをほぼ0まで縮める一方、Y方向の
-  // 沈み込みが極わずか（dt*2.2の合計で1未満）しかなく、床面を下回る前に縮小しきって
-  // しまうため「穴に落ちる」のではなく「その場で消滅する」ように見えていた
-  // （テツさま実機報告）。重力加速度で十分な深さ（Y=-1.4）まで沈めることで、床の
-  // 不透明面に自然に隠れて消えるようにし、縮小は軽い補助演出（0.35倍まで）に留めた。
-  for (let i = holeCoinsFalling.length - 1; i >= 0; i--) {
-    const h = holeCoinsFalling[i];
-    h.t += dt;
-    h.vy += world.gravity.y * dt * 0.6; // 実際の重力よりゆっくり落とし、演出が見える時間を確保
-    h.mesh.position.y += h.vy * dt;
-    h.mesh.rotation.x += dt * 3;
-    h.mesh.scale.setScalar(Math.max(1 - h.t / 0.9, 0.35));
-    if (h.mesh.position.y < -1.4) {
-      scene.remove(h.mesh);
-      holeCoinsFalling.splice(i, 1);
     }
   }
 
