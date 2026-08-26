@@ -272,7 +272,9 @@
   #pokerHandArea {
     position: fixed; left: 18px; top: 90px;
     display: none; flex-direction: column; gap: 18px;
-    z-index: 16;
+    /* gameOverOverlay(22)より前面。進行中のポーカーはGameOver中でも最後まで
+       見える必要があるため（dev-review 2026-08-26で発見、z-indexのみの修正） */
+    z-index: 23;
   }
   #pokerHandArea.show { display: flex; }
   .poker-hand-label {
@@ -303,7 +305,8 @@
   #pokerPanel {
     position: fixed; left: 50%; bottom: 100px; transform: translateX(-50%);
     display: none; flex-direction: column; align-items: center; gap: 10px;
-    z-index: 15; pointer-events: none;
+    /* gameOverOverlay(22)より前面。#pokerHandAreaと同じ理由 */
+    z-index: 23; pointer-events: none;
   }
   #pokerPanel.show { display: flex; }
   #pokerHint {
